@@ -35,7 +35,9 @@
 
 ### 用安装包（推荐）
 
-1. 拿到 `本鱼陪伴-Setup-x.y.z.exe`，双击安装；安装向导里可以改安装路径。
+**[→ 下载最新安装包](https://github.com/ZhongYiSS/body-of-fish/releases/latest)**（`BodyOfFish-Setup-x.y.z.exe`）
+
+1. 双击安装；安装向导里可以改安装路径。
 2. **用桌面快捷方式或开始菜单启动**——别直接双击安装目录里的 `BodyOfFish.exe`。她需要 `--no-sandbox --disable-gpu-sandbox --in-process-gpu` 这几个参数，快捷方式里已经带好了。
 3. 右键小窗打开菜单。
 
