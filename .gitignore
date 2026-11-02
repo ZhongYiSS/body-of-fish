@@ -1,0 +1,8 @@
+node_modules/
+lib/
+*.log
+runtime/electron-helper/*.bak*
+.DS_Store
+assets/webm/
+assets/preview/
+release/

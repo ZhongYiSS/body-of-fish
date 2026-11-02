@@ -1,0 +1,34 @@
+{
+  "name": "body-of-fish-bridge",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "DSH ↔ 本鱼陪伴（Body of Fish）桥：把桌宠的语音/图片交给 DSH，把 DSH 的回复交回桌宠说/演。",
+  "keywords": [
+    "deepseek",
+    "deepseek-harness",
+    "dsh",
+    "dsh-plugin",
+    "pet",
+    "bridge"
+  ],
+  "main": "lib/index.js",
+  "exports": {
+    ".": "./lib/index.js",
+    "./cordis.patch.yml": "./cordis.patch.yml",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "lib",
+    "cordis.patch.yml",
+    "README.md"
+  ],
+  "peerDependencies": {
+    "@deepseek-ai/cordis": "^4.0.1"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  }
+}
