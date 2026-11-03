@@ -58,7 +58,7 @@ const fields = {
     .refine((s) => !containsControlChar(s)),
   enabled: z.boolean(),
   automaticWhispers: z.boolean(),
-  whisperIntervalSec: z.number().int().min(60).max(86400),
+  whisperIntervalSec: z.number().int().min(30).max(86400),
   maxTokens: z.number().int().min(128).max(4096),
   timeoutMs: z.number().int().min(1000).max(60_000),
   apiKey: z

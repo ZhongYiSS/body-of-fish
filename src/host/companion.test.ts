@@ -126,7 +126,8 @@ describe('companion —— 一轮的语义', () => {
 
   test('画面没变 1 次 → same；到 idleStopAfter 次 → stopped 且 running=false', async () => {
     // 第一张没有上一张可比，算 changed；之后一直同一张 → same
-    const { calls, deps } = harness({ frames: [frame(0)] });
+    // 显式给 idleStopAfter=2：默认值后来调成 10（15 秒 × 10 ≈ 2.5 分钟才歇），这里只验到线即停
+    const { calls, deps } = harness({ frames: [frame(0)], config: { idleStopAfter: 2 } });
     const pet = createCompanion(deps);
     pet.start();
 
@@ -134,7 +135,7 @@ describe('companion —— 一轮的语义', () => {
     assert.equal(await pet.tickOnce(), 'same');
     assert.deepEqual(pet.status(), { running: true, ticks: 2, idle: 1 });
 
-    // idleStopAfter 默认 2：这是第 2 次"没变"，到线自己关
+    // idleStopAfter 给的是 2：这是第 2 次"没变"，到线自己关
     assert.equal(await pet.tickOnce(), 'stopped');
     assert.deepEqual(pet.status(), { running: false, ticks: 3, idle: 2 });
     assert.equal(pet.status().running, false);

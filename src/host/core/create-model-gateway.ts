@@ -38,6 +38,13 @@ export interface SessionChat {
   chat(request: ChatRequest): Promise<string>;
 }
 
+/**
+ * Edge 朗读「明显太短 = 等于没说话」的门槛（字节）。
+ * 一句正常的中文短句在 24kHz/48kbps mp3 下也有 10KB 上下；几百字节到 2KB 多半是空话音。
+ * 只用来决定「要不要退回系统语音」，不参与任何音质判断。
+ */
+const MIN_EDGE_AUDIO_BYTES = 2_000;
+
 export interface ModelGatewayDeps {
   /** 每次调用都重新读：设置页改完配置不用重启 */
   readConfig(): ModelConfig;
@@ -142,7 +149,19 @@ export function createModelGateway(deps: ModelGatewayDeps): ModelGateway {
         return sapiSpeak(text, { voice: speakOptions?.voice });
       }
       if (backend.protocol === 'edge') {
-        return edgeSpeak(text, { voice: speakOptions?.voice });
+        // 【汐儿 · 11-03】Edge 是免费服务，网络抖一下就会失败：适配器已重试一次「空音频」，
+        // 偶尔还会回一段几乎没声的短 mp3（实测 < 2KB 基本是空话音）。这两种都退回系统语音，
+        // 让哥哥顶多听到一句稍平的朗读，而不是对着空气等半天、或者干脆没声。
+        try {
+          const audio = await edgeSpeak(text, { voice: speakOptions?.voice });
+          if (audio.byteLength >= MIN_EDGE_AUDIO_BYTES) return audio;
+          console.warn(`[dsh-pet] Edge 回了疑似空音频（${audio.byteLength} 字节），改用系统语音`);
+        } catch (error) {
+          console.warn(
+            `[dsh-pet] Edge 朗读失败，改用系统语音：${error instanceof Error ? error.message : String(error)}`,
+          );
+        }
+        return sapiSpeak(text, { voice: speakOptions?.voice });
       }
       if (backend.protocol === 'sovits') {
         return sovitsSpeak(

@@ -81,6 +81,8 @@ export interface PetMenuState {
   whisperIntervalSec?: number;
   /** 接入 DSH 的桥（undefined = 桥插件没起/没写发现文件；enabled = 桌宠的回复交给 DSH 本鱼） */
   dshBridge?: {
+    /** 桥此刻连不连得上（false = DSH 没开 / 插件没起；菜单标「没连上」） */
+    available?: boolean;
     enabled: boolean;
     title: string;
     /** 当前对准的会话名（只用来显示；选会话走网页，不塞进菜单了） */
@@ -160,7 +162,15 @@ export function petMenuLabels(state: PetMenuState): string[] {
     `${STATE_PREFIX}接入 · 装插件到 DSH…`,
     ...(state.dshBridge
       ? [
-          `${STATE_PREFIX}接入 · ${state.dshBridge.enabled ? `✓ 开（${state.dshBridge.selectedTitle || state.dshBridge.title || '未知'}）` : '关'}`,
+          // 11-03：available=false 时不再用「开/关」的确定语气 —— DSH 没开是「没连上」，
+          // 不是用户把它关了；点开关会提示「先把 DSH 打开」。
+          `${STATE_PREFIX}接入 · ${
+            state.dshBridge.available === false
+              ? '⚠ 没连上 DSH'
+              : state.dshBridge.enabled
+                ? `✓ 开（${state.dshBridge.selectedTitle || state.dshBridge.title || '未知'}）`
+                : '关'
+          }`,
           `${STATE_PREFIX}接入 · 选会话…`,
         ]
       : []),
@@ -175,7 +185,9 @@ export function petMenuLabels(state: PetMenuState): string[] {
   labels.push(`${COMPANION_PREFIX}自定义…`);
   if (state.companionRunning) labels.push(`${COMPANION_PREFIX}关陪伴`);
   // 碎碎念那一层：开关只有一项，带 ✓ 的那项就是"关掉它"——菜单里不许有点不动的东西
-  labels.push(state.whisperEnabled === true ? '碎碎念：✓ 自动关' : '碎碎念：自动开');
+  // 【11-03 哥哥「30 秒碎碎念疑似没生效」】旧文案「✓ 自动关」读起来像"自动关着"，
+  //   明明开着却让人以为没生效。改成「✓ 自动开（点一下关）」——状态和动作都写清楚。
+  labels.push(state.whisperEnabled === true ? '碎碎念：✓ 自动开（点一下关）' : '碎碎念：自动关（点一下开）');
   for (const item of WHISPER_INTERVALS) {
     // ✓ 只挂在**实际生效**的那一档上；没开自动时也照样显示（调完间隔再开也看得懂）
     labels.push(`碎碎念：${state.whisperIntervalSec === item.seconds ? '✓ ' : ''}${item.label}`);
@@ -255,8 +267,8 @@ export function parsePetMenuLabel(label: string): PetMenuAction | null {
   if (text === '歌词：开歌词') return { kind: 'lyric-start' };
   if (text === '歌词：关歌词' || text === '歌词：✓ 关歌词') return { kind: 'lyric-stop' };
   if (text === '声音：说一句') return { kind: 'speak' };
-  if (text === '碎碎念：自动开') return { kind: 'whisper-enable' };
-  if (text === '碎碎念：✓ 自动关') return { kind: 'whisper-disable' };
+  if (text === '碎碎念：自动开' || text === '碎碎念：自动关（点一下开）') return { kind: 'whisper-enable' };
+  if (text === '碎碎念：✓ 自动关' || text === '碎碎念：✓ 自动开（点一下关）') return { kind: 'whisper-disable' };
   if (text === '碎碎念：打开池子' || text === '碎碎念：✓ 打开池子') return { kind: 'whisper-pool' };
   if (text.startsWith(WHISPER_PREFIX)) {
     const rest = text.slice(WHISPER_PREFIX.length).replace(/^✓\s*/, '').trim();

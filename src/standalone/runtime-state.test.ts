@@ -4,6 +4,7 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { test } from 'node:test';
 
+import { dataDirIn } from '../host/data-dir';
 import { writeStandaloneRuntime } from './runtime-state.ts';
 
 test('launcher runtime capability is private and only its owning process removes it', () => {
@@ -16,7 +17,7 @@ test('launcher runtime capability is private and only its owning process removes
       pluginRoot: '/test/plugin',
     };
     const release = writeStandaloneRuntime(home, details);
-    const file = join(home, 'dsh-pet', 'standalone-runtime.json');
+    const file = join(dataDirIn(home), 'standalone-runtime.json');
     const state = JSON.parse(readFileSync(file, 'utf8'));
     assert.equal(state.name, 'dsh-pet-standalone');
     assert.equal(state.pid, process.pid);
@@ -42,7 +43,7 @@ test('runtime cleanup is idempotent and removes its own manifest', () => {
     });
     release();
     release();
-    assert.throws(() => readFileSync(join(home, 'dsh-pet', 'standalone-runtime.json')), /ENOENT/);
+    assert.throws(() => readFileSync(join(dataDirIn(home), 'standalone-runtime.json')), /ENOENT/);
   } finally {
     rmSync(home, { recursive: true, force: true });
   }

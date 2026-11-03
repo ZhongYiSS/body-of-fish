@@ -69,6 +69,8 @@ test('状态二级：四项齐、顺序是 陪伴/嗓子/眼睛/歌词、值跟�
     '状态：嗓子 · 关',
     '状态：眼睛 · 关',
     '状态：歌词 · 关',
+    // 11-01 新增：装插件这一项不依赖桥是否连上（新用户第一次就靠它把插件装进 DSH）
+    '状态：接入 · 装插件到 DSH…',
   ]);
 
   const on = petMenuLabels({
@@ -83,6 +85,7 @@ test('状态二级：四项齐、顺序是 陪伴/嗓子/眼睛/歌词、值跟�
     '状态：嗓子 · 云',
     '状态：眼睛 · 本地',
     '状态：歌词 · 开',
+    '状态：接入 · 装插件到 DSH…',
   ]);
 });
 
@@ -102,8 +105,8 @@ test('陪伴层：未启动给四档不出现关停项；启动后当前档打 �
 
 test('碎碎念层：开关只留一项能点的，档位带 ✓，还留了进池子和填秒数的口', () => {
   const off = petMenuLabels({ ...idle, whisperEnabled: false, whisperIntervalSec: 300 });
-  assert.ok(off.includes('碎碎念：自动开'));
-  assert.ok(!off.includes('碎碎念：✓ 自动关'), '关着的时候不该出现「关掉它」那项');
+  assert.ok(off.includes('碎碎念：自动关（点一下开）'));
+  assert.ok(!off.includes('碎碎念：✓ 自动开（点一下关）'), '关着的时候不该出现「关掉它」那项');
   assert.ok(off.includes('碎碎念：✓ 5 分钟'), '当前间隔要打 ✓');
   assert.ok(!off.includes('碎碎念：5 分钟'));
   assert.ok(off.includes('碎碎念：打开池子'));
@@ -111,8 +114,8 @@ test('碎碎念层：开关只留一项能点的，档位带 ✓，还留了进�
   assert.ok(off.includes('碎碎念：自定义（300 秒）'), '自定义项要带上当前秒数');
 
   const on = petMenuLabels({ ...idle, whisperEnabled: true, whisperIntervalSec: 1800 });
-  assert.ok(on.includes('碎碎念：✓ 自动关'));
-  assert.ok(!on.includes('碎碎念：自动开'));
+  assert.ok(on.includes('碎碎念：✓ 自动开（点一下关）'));
+  assert.ok(!on.includes('碎碎念：自动关（点一下开）'), '开着的时候不该出现「打开它」那项');
   assert.ok(on.includes('碎碎念：✓ 30 分钟'));
   // 不是四档之一时才给自定义项打 ✓，免得看着像「没设置」
   const custom = petMenuLabels({ ...idle, whisperEnabled: true, whisperIntervalSec: 420 });
@@ -153,8 +156,10 @@ test('陪伴/碎碎念各条都能解析', () => {
   assert.deepEqual(parsePetMenuLabel('陪伴：看一眼'), { kind: 'look' });
   assert.deepEqual(parsePetMenuLabel('陪伴：关陪伴'), { kind: 'companion-stop' });
   assert.deepEqual(parsePetMenuLabel('陪伴：✓ 开 1 分钟'), { kind: 'companion-start', intervalMs: 60000 });
-  assert.deepEqual(parsePetMenuLabel('碎碎念：自动开'), { kind: 'whisper-enable' });
-  assert.deepEqual(parsePetMenuLabel('碎碎念：✓ 自动关'), { kind: 'whisper-disable' });
+  assert.deepEqual(parsePetMenuLabel('碎碎念：自动关（点一下开）'), { kind: 'whisper-enable' });
+  assert.deepEqual(parsePetMenuLabel('碎碎念：自动开'), { kind: 'whisper-enable' }, '旧文案仍可解析');
+  assert.deepEqual(parsePetMenuLabel('碎碎念：✓ 自动开（点一下关）'), { kind: 'whisper-disable' });
+  assert.deepEqual(parsePetMenuLabel('碎碎念：✓ 自动关'), { kind: 'whisper-disable' }, '旧文案仍可解析');
   assert.deepEqual(parsePetMenuLabel('碎碎念：✓ 15 分钟'), { kind: 'whisper-interval', seconds: 900 });
   assert.deepEqual(parsePetMenuLabel('碎碎念：打开池子'), { kind: 'whisper-pool' });
   assert.deepEqual(parsePetMenuLabel('碎碎念：自定义（300 秒）'), { kind: 'whisper-custom' });
@@ -217,16 +222,16 @@ test('真实 MenuRegistry：注册 → 点击 → 长轮询取回，读一次就
   const registry = new MenuRegistry();
   assert.equal(registry.register({ owner: PET_MENU_OWNER, labels: petMenuLabels(idle) }).ok, true);
 
-  const clicked = registry.click({ owner: PET_MENU_OWNER, label: '陪伴：开 45 秒', pet: 'main' });
+  const clicked = registry.click({ owner: PET_MENU_OWNER, label: '陪伴：开 1 分钟', pet: 'main' });
   assert.deepEqual(clicked, { ok: true, delivered: true });
 
   const events = await registry.poll(PET_MENU_OWNER, 10);
   assert.ok(events);
-  assert.equal(events['陪伴：开 45 秒'], 'main');
+  assert.equal(events['陪伴：开 1 分钟'], 'main');
 
   const again = await registry.poll(PET_MENU_OWNER, 10);
   assert.ok(again);
-  assert.equal(again['陪伴：开 45 秒'], null, '读取即消费：闩锁不是队列');
+  assert.equal(again['陪伴：开 1 分钟'], null, '读取即消费：闩锁不是队列');
 });
 
 test('owner 被清掉后 poll 回 null —— 宿主必须重新注册', async () => {

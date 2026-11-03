@@ -56,14 +56,14 @@ export function automaticWhisperSchedule(
   const jitter = (base: number): number => {
     const random = options.random ?? Math.random;
     const factor = 1 - WHISPER_JITTER + random() * WHISPER_JITTER * 2;
-    // 夹紧发生在**抖动之后**：60 秒是防连发的硬下限（配置写 0/负数时也靠它兜底），
+    // 夹紧发生在**抖动之后**：30 秒是防连发的硬下限（配置写 0/负数时也靠它兜底），
     // 只夹 before 的话 0.8×60=48 又把下限吃回去了，等于抖动偷偷放开了限制。
-    return Math.max(60, base * factor);
+    return Math.max(30, base * factor);
   };
   // DSH 宿主：沿用原来的口径（只看宠物开关 + 配置周期），不掺抖动——
   // 那是插件模式的老行为，主人（哥哥）没让改，改了反而不好对账。
   if (!policy) return { enabled: petEnabled, periodSec: configuredPeriodSec };
-  const base = Number.isFinite(configuredPeriodSec) ? Math.max(60, configuredPeriodSec) : 300;
+  const base = Number.isFinite(configuredPeriodSec) ? Math.max(30, configuredPeriodSec) : 300;
   // 池里有句子 → 绕开的是「云端就绪」这一道，不是用户的开关：
   // 说与不说由宠物自己的 `whisperEnabled`（petEnabled）决定；池子空着、真要回模型时，
   // 才额外要求 `isReady()`——独立版池空本来就直接安静（publishWhisper 不回落模型）。

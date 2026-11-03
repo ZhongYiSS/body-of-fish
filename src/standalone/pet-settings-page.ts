@@ -125,6 +125,15 @@ export const petSettingsScript = `
   const testResult = get('test-result');
   const PET = '/standalone-pet/settings';
   const AI = '/standalone-ai/settings';
+  // 本地后端参数备忘（哥哥 11-03 报：本地 → 云端 → 再切回本地，地址和模型都被清空要重填）。
+  // 服务端一次只存一种后端，切到云端后本地那份就从配置里消失了；页面这边切走前记一份、
+  // 切回来时补回空栏即可。存在 localStorage，关掉设置页再打开也还在。
+  const MEMO_KEY = 'body-of-fish.local-backend.memo';
+  const memo = (() => {
+    try { const raw = JSON.parse(localStorage.getItem(MEMO_KEY) || '{}'); return raw && typeof raw === 'object' ? raw : {}; }
+    catch { return {}; }
+  })();
+  const saveMemo = () => { try { localStorage.setItem(MEMO_KEY, JSON.stringify(memo)); } catch { /* 无痕模式写不了，忽略 */ } };
   function message(text, kind) { status.textContent = text; status.dataset.error = String(kind === 'error'); status.dataset.ok = String(kind === 'ok'); }
   async function request(path, method, body) {
     const response = await fetch(path, {
@@ -177,6 +186,33 @@ export const petSettingsScript = `
     get('key-state').textContent = ai.hasKey ? '已保存 · 不回显' : '尚未设置';
     get('apiKey').value = '';
     get('clearApiKey').checked = false;
+  }
+  // 本地后端参数备忘：从本地切到云端前记下「本地地址 / 模型名」，切回本地时补回空栏
+  function wireLocalMemo() {
+    for (const cap of ['vision', 'voice']) {
+      const mode = get(cap + 'Mode'); const endpoint = get(cap + 'Endpoint'); const model = get(cap + 'Model');
+      if (!mode || !endpoint || !model) continue;
+      const remember = () => {
+        const saved = memo[cap] || {};
+        memo[cap] = {
+          endpoint: endpoint.value.trim() || saved.endpoint || '',
+          model: model.value.trim() || saved.model || '',
+        };
+        saveMemo();
+      };
+      const restore = () => {
+        const saved = memo[cap] || {};
+        if (endpoint.value.trim() === '' && saved.endpoint) endpoint.value = saved.endpoint;
+        if (model.value.trim() === '' && saved.model) model.value = saved.model;
+      };
+      let last = mode.value;
+      if (last === 'local') remember(); // 页面一打开就是本地：先把现有值记一份
+      mode.addEventListener('change', () => {
+        if (last === 'local' && mode.value !== 'local') remember();
+        if (mode.value === 'local') restore();
+        last = mode.value;
+      });
+    }
   }
   function petBody() {
     const body = {
@@ -271,6 +307,7 @@ export const petSettingsScript = `
     } catch (error) { message(error instanceof Error ? error.message : String(error), 'error'); }
     finally { save.disabled = false; }
   });
+  wireLocalMemo();
   load().catch((error) => message(error instanceof Error ? error.message : String(error), 'error'));
 })();
 `;

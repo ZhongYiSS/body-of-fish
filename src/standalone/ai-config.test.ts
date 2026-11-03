@@ -39,7 +39,7 @@ test('validates safe endpoints and explicit configuration with fixed redacted er
   for (const patch of [
     { model: '' },
     { timeoutMs: 60001 },
-    { whisperIntervalSec: 59 },
+    { whisperIntervalSec: 29 },
     { maxTokens: 100000 },
     { hasKey: true },
     { enabled: 'true' },
@@ -64,10 +64,10 @@ test('persists only in isolated home, redacts keys, supports keep and clear, rel
     assert.equal(saved.whisperIntervalSec, 300);
     assert.equal((await store.save({ apiKey: '', automaticWhispers: true })).hasKey, true);
     assert.equal(createAiConfig(home).publicSettings().model, 'chosen-model');
-    assert.match(readFileSync(join(home, 'dsh-pet', 'standalone-ai.json'), 'utf8'), /test-secret/);
+    assert.match(readFileSync(join(home, 'body-of-fish', 'standalone-ai.json'), 'utf8'), /test-secret/);
     assert.equal((await store.save({ clearApiKey: true, enabled: false })).hasKey, false);
     assert.equal(createAiConfig(home).publicSettings().enabled, false);
-    writeFileSync(join(home, 'dsh-pet', 'standalone-ai.json'), '{broken');
+    writeFileSync(join(home, 'body-of-fish', 'standalone-ai.json'), '{broken');
     assert.throws(() => createAiConfig(home), /^Error: Cannot securely load standalone AI settings\.$/);
   } finally {
     rmSync(home, { recursive: true, force: true });

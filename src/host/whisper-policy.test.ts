@@ -53,11 +53,11 @@ test('周期带 ±20% 抖动：不会每 5 分钟整点打卡，也不会掉到 
 });
 
 test('坏配置也不会把碎碎念变成连发循环', () => {
-  // 下限 60 秒是硬闸：抖动在夹紧**之后**算，且算完再夹一次，绝不可能出现几十毫秒的连发
+  // 下限 30 秒是硬闸：抖动在夹紧**之后**算，且算完再夹一次，绝不可能出现几十毫秒的连发
   for (const r of [0, 0.5, 0.999999]) {
     const sec = automaticWhisperSchedule(policy, true, 0, { random: () => r }).periodSec;
-    assert.ok(sec >= 60, `下限被抖动吃掉了：${sec}`);
+    assert.ok(sec >= 30, `下限被抖动吃掉了：${sec}`);
   }
   assert.equal(automaticWhisperSchedule(policy, true, Number.NaN, mid).periodSec, 300);
-  assert.equal(automaticWhisperSchedule(policy, true, 30, mid).periodSec, 60);
+  assert.equal(automaticWhisperSchedule(policy, true, 10, mid).periodSec, 30);
 });

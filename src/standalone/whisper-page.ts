@@ -13,9 +13,9 @@ export const whisperPage = `<!doctype html>
 <h1>多久自己说一句</h1><p class="intro">只从本机「碎碎念池」里抽一句，不联网、不花钱。<br>填好后点保存，右键菜单那张 ✓ 会跟着变。</p></header>
 <form id="whisper">
 <label for="seconds">间隔（秒）</label>
-<input id="seconds" type="number" min="60" max="86400" step="1" required>
+<input id="seconds" type="number" min="30" max="86400" step="1" required>
 <p class="hint" id="current">正在读取当前间隔…</p>
-<p class="hint">范围 60–86400 秒（1 分钟到 24 小时）。实际触发会前后浮动约 20%，不会整点打卡。</p>
+<p class="hint">范围 30–86400 秒（半分钟到 24 小时）。实际触发会前后浮动约 20%，不会整点打卡。</p>
 <footer><button id="save" type="submit">保存</button><p id="status" role="status" aria-live="polite"></p></footer>
 </form></main></body></html>
 `;
@@ -83,7 +83,7 @@ export const whisperScript = `
       message('', null);
       return;
     }
-    const seconds = Math.max(60, Math.round(Number(data.whisperIntervalSec) || 60));
+    const seconds = Math.max(30, Math.round(Number(data.whisperIntervalSec) || 60));
     field.value = String(seconds);
     current.textContent = '当前：每 ' + seconds + ' 秒（约 ' + (Math.round((seconds / 60) * 10) / 10) + ' 分钟）';
     message('', null);
@@ -103,7 +103,7 @@ export const whisperScript = `
         return;
       }
       const data = await request('POST', { whisperIntervalSec: Number(field.value) });
-      const seconds = Math.max(60, Math.round(Number(data.whisperIntervalSec) || Number(field.value)));
+      const seconds = Math.max(30, Math.round(Number(data.whisperIntervalSec) || Number(field.value)));
       field.value = String(seconds);
       current.textContent = '当前：每 ' + seconds + ' 秒';
       message('已保存', 'ok');

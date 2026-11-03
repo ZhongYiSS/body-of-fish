@@ -68,7 +68,7 @@ class FakeRes extends Writable {
 before(() => {
   dir = mkdtempSync(join(tmpdir(), 'dsh-pet-routes-'));
   const home = join(dir, 'home');
-  const userRoot = join(home, 'dsh-pet');
+  const userRoot = join(home, 'body-of-fish');
   // 合法素材：pet pack 自己的目录（中文名）+ 主素材池
   mkdirSync(join(userRoot, 'pet', `${CN_PET}-animation`), { recursive: true });
   writeFileSync(join(userRoot, 'pet', `${CN_PET}-animation`, 'test.webm'), OWN);

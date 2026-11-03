@@ -252,6 +252,8 @@ describe('readSay —— 说话叶子（弹气泡 / 清空 两种形态）', () 
       url: undefined,
       duration: undefined,
       anim: undefined,
+      // 11-02 表情包三段式：phase 是"念完再出图"的标记，不带就留 undefined
+      phase: undefined,
     });
   });
 

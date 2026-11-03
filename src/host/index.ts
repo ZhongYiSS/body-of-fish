@@ -109,6 +109,7 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { spawn } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { readFile, mkdir, writeFile } from 'node:fs/promises';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { homedir } from 'node:os';
@@ -121,6 +122,7 @@ import { listBalanceProviders, queryBalance, registerBalanceProvider } from './b
 import { generateWhisper, generateWhisperViaGateway } from './whisper';
 import { automaticWhisperSchedule } from './whisper-policy';
 import { generateChat, generateChatViaGateway, type ChatMemoryMessage } from './chat';
+import { audioDurationMs } from './core/audio-duration';
 import { createModelGateway, type SessionChat } from './core/create-model-gateway';
 import { parseModelConfig, toConfigSection } from './core/model-config';
 import { configuredModel } from './model-selection';
@@ -542,16 +544,20 @@ export function apply(ctx: any): void {
   // 独立模式没有 DSH 会话（伪 ctx 不订阅事件），所以只能走文件 + HTTP。
   let dshBridgeUrl = '';
   let dshBridge: DshBridgeState = EMPTY_BRIDGE_STATE;
+  /** 最后一次**连得上**时桥上的开关（DSH 关掉后 discovery 还在、状态却读不到——菜单别显示成「关」） */
+  let dshBridgeWanted = false;
   /** 重读发现文件并问一次桥：返回最新运行态（桥不在就回落 EMPTY） */
   const refreshDshBridge = async (): Promise<DshBridgeState> => {
     const discovery = await readDshBridgeDiscovery(userRoot);
     if (discovery === null) {
       dshBridgeUrl = '';
       dshBridge = EMPTY_BRIDGE_STATE;
+      dshBridgeWanted = false;
       return dshBridge;
     }
     dshBridgeUrl = discovery.url;
     dshBridge = await fetchDshBridgeState(discovery.url);
+    if (dshBridge.available) dshBridgeWanted = dshBridge.enabled;
     return dshBridge;
   };
   /**
@@ -1565,34 +1571,10 @@ export function apply(ctx: any): void {
   /**
    * 这段音频大概多长（毫秒）——气泡要**跟着声音走**：哥哥 10-31 说"气泡需要等语音播报"，
    * 所以固定 10 秒是错的：话短了气泡还在发呆，话长了声音没完气泡先消。
-   * 只解 wav（RIFF/fmt/data，本机 SAPI 与 GSV 都回 wav）；认不出的按 4 秒兜底。
+   * 【本鱼 · 11-03】真身搬到 `core/audio-duration.ts`：以前只解 wav，Edge / OpenAI 兼容回的
+   * mp3 一律按 4 秒兜底 —— 结果「念 16 秒、气泡 6 秒就收起来」，哥哥报的「长对话气泡中途消失」
+   * 就是这个。现在 wav / mp3（含 Xing 帧数、CBR 折算）都真算。
    */
-  const audioDurationMs = (audio: Uint8Array): number => {
-    try {
-      const view = new DataView(audio.buffer, audio.byteOffset, audio.byteLength);
-      const tag = (offset: number): string =>
-        String.fromCharCode(audio[offset], audio[offset + 1], audio[offset + 2], audio[offset + 3]);
-      if (audio.byteLength > 44 && tag(0) === 'RIFF' && tag(8) === 'WAVE') {
-        let byteRate = 0;
-        let dataSize = 0;
-        let offset = 12;
-        while (offset + 8 <= audio.byteLength) {
-          const id = tag(offset);
-          const size = view.getUint32(offset + 4, true);
-          if (id === 'fmt ') byteRate = view.getUint32(offset + 16, true);
-          if (id === 'data') {
-            dataSize = size;
-            break;
-          }
-          offset += 8 + size + (size % 2); // chunk 按偶数字节对齐
-        }
-        if (byteRate > 0 && dataSize > 0) return Math.round((dataSize / byteRate) * 1000);
-      }
-    } catch {
-      /* 解析失败就用兜底 */
-    }
-    return 4000;
-  };
 
   /**
    * 写入气泡并出声（对话/陪伴/看一眼共用）：**一句话一个气泡，按句依次冒**
@@ -1991,13 +1973,13 @@ export function apply(ctx: any): void {
         // 接入开关：开 = 桌宠的回答交给 DSH 本鱼；关 = 回到自带模型（默认关）
         const bridge = await refreshDshBridge();
         if (!bridge.available) {
-          result = { ok: false, message: '没连上 DSH（桥插件没开？）' };
+          result = { ok: false, message: 'DSH 没开（桥插件连不上）：先把 DSH 打开再点这里' };
           break;
         }
         const nextEnabled = !bridge.enabled;
         const changed = await setDshBridgeConfig(dshBridgeUrl, { enabled: nextEnabled });
         if (!changed) {
-          result = { ok: false, message: '改不动 DSH 那边（插件没响应）' };
+          result = { ok: false, message: 'DSH 没响应（可能刚关了）：开起来再试' };
           break;
         }
         dshBridge = await fetchDshBridgeState(dshBridgeUrl);
@@ -2105,7 +2087,10 @@ export function apply(ctx: any): void {
       // 状态 ▸ 接入：**永远都在**（桥没连上也显示「没连上」）——藏起来的话第一次用的人
       // 根本不知道有这功能（哥哥 11-01 报过一次「右键菜单里没有」）。标题只放会话名前 12 字。
       dshBridge: {
-        enabled: dshBridge.enabled,
+        // 11-03：DSH 关了以后发现文件还在，状态却读不到（available=false）——
+        // 这时按最后一次连得上时的开关显示，并让菜单标出「没连上」，别假装一切正常或假装「关」。
+        available: dshBridge.available,
+        enabled: dshBridge.available ? dshBridge.enabled : dshBridgeWanted,
         title:
           dshBridgeUrl === ''
             ? '没连上'
@@ -2179,11 +2164,16 @@ export function apply(ctx: any): void {
     return () => {};
   });
   // 「接入 DSH」：初始化读一次发现文件，之后每 20 秒问一次桥（桥那边每次收到请求/改配置都会重写发现文件）
+  // 【汐儿 · 11-03】失败一律吞掉：桥没起 / 请求被中止 / 配置读不到时这里 reject 是**常态**，
+  // 不接住就是 unhandledRejection（源码形态下会让整份测试文件判红，宿主也可能被带崩）。
+  const refreshBridgeQuiet = (): void => {
+    void refreshDshBridge()
+      .then(() => refreshPetMenu())
+      .catch(() => {});
+  };
   ctx.effect(() => {
-    void refreshDshBridge().then(() => refreshPetMenu());
-    const timer = setInterval(() => {
-      void refreshDshBridge().then(() => refreshPetMenu());
-    }, 20_000);
+    refreshBridgeQuiet();
+    const timer = setInterval(refreshBridgeQuiet, 20_000);
     return () => clearInterval(timer);
   });
   // 系统通知帧：host 监听 DSH 宿主事件生成通知帧（帧契约与 shared/notify.ts 一致），写进 S 的
@@ -2429,20 +2419,24 @@ export function apply(ctx: any): void {
       if (!found) return { ok: false, reason: 'unknown-pet', message: '没有这只桌宠：' + petId };
       // 「接入 DSH」开着：桌宠的话交给 DSH 本鱼，回复由桥在回合结束时送回气泡——这边不生成、
       // 也不写 pet 记忆（在 DSH 会话里聊什么，由 DSH 自己记；这里只记"我说了什么"）。
-      if (dshBridge.enabled && dshBridgeUrl !== '') {
-        await memoryStore.remember({ role: 'user', text, source: 'chat' });
+      if (dshBridgeUrl !== '' && (dshBridge.enabled || (!dshBridge.available && dshBridgeWanted))) {
         const sent = await sayToDsh(dshBridgeUrl, text);
-        if (!sent) {
-          dshBridge = await fetchDshBridgeState(dshBridgeUrl);
-          return { ok: false, reason: 'generate-error', message: 'DSH 那边没接住（桥插件没响应）' };
+        if (sent) {
+          await memoryStore.remember({ role: 'user', text, source: 'chat' });
+          // 回一句占位话给调用方：/chat 的调用方（热键「听」的听.py）拿空文本会当成"她没回话"
+          // 报错。真正的内容等桥在回合结束时送回气泡/嗓子，这里只负责"我知道你在说了"。
+          // 不写 pet 记忆（DSH 会话那边自己记），也不念出来（念就成第二份声音了）。
+          void servicesProvider('main')
+            .bubble.say({ petId, text: '嗯嗯，本鱼听着，这就去问', duration: 2200 })
+            .catch(() => null);
+          return { ok: true as const, text: '（已转给本鱼，等她回话）' };
         }
-        // 回一句占位话给调用方：/chat 的调用方（热键「听」的听.py）拿空文本会当成"她没回话"
-        // 报错。真正的内容等桥在回合结束时送回气泡/嗓子，这里只负责"我知道你在说了"。
-        // 不写 pet 记忆（DSH 会话那边自己记），也不念出来（念就成第二份声音了）。
+        // 11-03：DSH 没开 / 桥插件没响应 → **降级自己答**，别把「DSH 那边没接住」丢给用户当错误。
+        // 桥的状态顺手刷新一次，菜单和下一轮就知道它掉线了。
+        dshBridge = await fetchDshBridgeState(dshBridgeUrl);
         void servicesProvider('main')
-          .bubble.say({ petId, text: '嗯嗯，本鱼听着，这就去问', duration: 2200 })
+          .bubble.say({ petId, text: 'DSH 没开，本鱼先自己答～', duration: 2400 })
           .catch(() => null);
-        return { ok: true as const, text: '（已转给本鱼，等她回话）' };
       }
       const rounds = memoryRounds(found.conf);
       // 人设：实例级 whisperPrompt 优先，没写回落所属条目（与碎碎念同一拼装）
@@ -3162,6 +3156,9 @@ export function apply(ctx: any): void {
       const services = servicesProvider(petId);
       // 合成期间（系统语音/SoVITS 要一两秒）如果哥哥已经按了听键/看了图，这句就别再冒出来了。
       const myEpoch = loudEpoch;
+      // 【11-03 哥哥问「转交给桌宠到念出来要多久」】分段计时：合成（synth）/ 出声（first）/ 念完（done）。
+      // 只写日志，不改时序；想知道卡在哪一段看这三行就够。
+      const t0 = Date.now();
       try {
         const result = await services.voice.speak({
           text: clipped,
@@ -3169,16 +3166,19 @@ export function apply(ctx: any): void {
         });
         // 【本鱼 · 11-01】气泡跟着音频走：等播放器真的开始才冒，时长 = 音频 + 尾巴。
         // 以前由桥写死 12 秒，语音长一点就会「声音还在、字先没了」（哥哥提的就是这个）。
+        logSayLoud(`timing synth=${Date.now() - t0}ms chars=${clipped.length}`);
         const duration = Math.max(3000, audioDurationMs(result.audio) + VOICE_TAIL_MS);
         let bubbleShown = false;
         const showBubble = (): void => {
           if (bubbleShown) return;
           bubbleShown = true;
+          logSayLoud(`timing first=${Date.now() - t0}ms`);
           void services.bubble.say({ petId, text: clipped, duration, source: 'dsh' }).catch(() => {
             /* 气泡失败不影响出声 */
           });
         };
         await playAudio(result.audio, result.mime, showBubble, true, myEpoch);
+        logSayLoud(`timing done=${Date.now() - t0}ms`);
         // 合成或播放途中被打断：气泡和表情包都别再冒（哥哥 11-01：新输入一进来，旧的整条让路）。
         if (myEpoch !== loudEpoch) return { kind: 'json', status: 200, obj: { ok: true, skipped: true } };
         if (!bubbleShown) showBubble();
@@ -3234,6 +3234,26 @@ export function apply(ctx: any): void {
         /* 日志不影响摘要 */
       }
       const maxChars = Math.min(120, Math.max(20, Number(parsedSum.maxChars) || 60));
+      // 【汐儿 · 11-03】提速一：短文本不值得走一次模型往返（实测 0.6~2.8s），按句切一下就能用，
+      // 也更忠于原文（模型面对一两句常会改写语气）。阈值取 maxChars*2：这正是摘要的目标长度。
+      const directCut = splitSummary(source, maxChars);
+      if (source.length <= maxChars * 2 && directCut.length > 0) {
+        return {
+          kind: 'json',
+          status: 200,
+          obj: { ok: true, sentences: directCut, text: directCut.join(''), source: 'short' },
+        };
+      }
+      // 【汐儿 · 11-03】提速二：同一条回复会被重复摘（重连、重试、桥插件重放），10 分钟内直接复用。
+      const cacheKey = `${maxChars}:${createHash('sha1').update(source).digest('hex')}`;
+      const cached = summaryCacheRead(cacheKey);
+      if (cached !== undefined) {
+        return {
+          kind: 'json',
+          status: 200,
+          obj: { ok: true, sentences: cached, text: cached.join(''), source: 'cache' },
+        };
+      }
       const petId = String(url.searchParams.get('pet') ?? 'main');
       const found = findPetInstance(readAllConfig(configPaths), petId);
       if (!found) return { kind: 'json', status: 404, obj: { error: `unknown pet: ${petId}` } };
@@ -3256,13 +3276,19 @@ export function apply(ctx: any): void {
               },
             }
           : modelConfig;
+      // 【汐儿 · 11-03】哥哥说摘要「有点笨」：旧提示词还是书面语，模型会照抄
+      // 「2807ms」「/say-loud」「src/host/...」这类念不出来也听不懂的东西，
+      // 还常把最亮的数字丢掉（实测 381 字那条，「2807ms → 37ms」整段没被选上）。
+      // 改成「说给耳朵听」的口径：先通读、第一句给最要紧的结论、第二句给最有用的
+      // 对比数字或待办；明令禁掉路径/函数名/命令/网址/下划线/斜杠，数字念顺口。
       const system = [
-        '你是转述器，不是聊天对象：把一段回复转成适合口播的两句人话。',
-        `硬要求：最多两句；每句不超过 ${maxChars} 个汉字；两句合计尽量写到 ${maxChars}–${maxChars * 2 - 20} 字——只压成几个词、听不出发生了什么，就算失败。`,
-        '先通读全文（从第一个字读到最后一个字）再动笔：这类回复常把真正的重点放在中段或结尾（「结论」「总结」「下一步」「待办」「需要哥哥做什么」），不要顺着开头写。',
-        '结构：第一句写全文最该先说的那件事（结论 / 结果 / 最重要的变化）；第二句再补细节（关键数字、文件名、命令、要哥哥拿主意的事、下一步）。第一句取的是「读完全文后最重要的那句」，不是开头第一段的意思。',
-        '抓重点时按这个次序：结论 → 影响/风险 → 具体细节（数字、路径、命令）→ 待办。宁可说具体，别写「已完成相关操作」「一切正常」这种空话；原文没有的数字和结论绝对不要编。',
-        '只输出这两句本身：不要引号、编号、开场白或解释。原文本来就很短（一两句）就原样保留，不要改写。',
+        '你是「说给耳朵听」的转述器：把一段回复改成两句能直接念出来的家常话，不是说给人看的报告。',
+        `长度：最多两句；每句不超过 ${maxChars} 字；两句合起来 ${maxChars}–${maxChars * 2 - 20} 字，别只留个零头。`,
+        '先通读全文再动笔。多数回复的重头在中间或结尾（结论、前后对比的数字、风险、下一步），别照着开头抄。',
+        '第一句说「最要紧的那件事」（修好了什么 / 结论是什么 / 有什么变化）；第二句补一个最有用的细节：前后对比的数字、要哥哥拿主意的事、下一步。',
+        '口播忌讳：不要出现文件路径、函数名、命令、网址、下划线、斜杠、括号编号；变量名和布尔值换成中文说法。数字念得顺口（「从快三秒变成几十毫秒」比「2807ms 降成 37ms」好听）。',
+        '语气自然，像妹妹跟哥哥说事：不要开头问候（气泡自己带语气），不要「已完成相关操作」「一切正常」这种空话，也不要编原文没有的数字。',
+        '只输出这两句本身，不要引号、编号、解释。原文本来只有一两句就照原样说。',
       ].join('');
       try {
         const gateway = createModelGateway({ readConfig: () => summarizeConfig, session: null });
@@ -3274,7 +3300,8 @@ export function apply(ctx: any): void {
         if (sentences.length === 0) {
           return { kind: 'json', status: 200, obj: { ok: false, reason: 'empty', error: '模型没吐出东西' } };
         }
-        return { kind: 'json', status: 200, obj: { ok: true, sentences, text: sentences.join('') } };
+        summaryCacheWrite(cacheKey, sentences);
+        return { kind: 'json', status: 200, obj: { ok: true, sentences, text: sentences.join(''), source: 'model' } };
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
         return { kind: 'json', status: 500, obj: { ok: false, reason: 'failed', error: message } };
@@ -4711,6 +4738,34 @@ export function apply(ctx: any): void {
  * 把模型吐出来的摘要切成「最多两句、每句 ≤ maxChars」。
  * 先按句末标点切；单句超长就在逗号处断（断不动才硬切），保证气泡不会被撑爆。
  */
+// ---- 摘要缓存：10 分钟内同一段原文直接复用（最多 64 条，超出淘汰最久未用的）
+const SUMMARY_CACHE_TTL_MS = 10 * 60_000;
+const SUMMARY_CACHE_MAX = 64;
+const summaryCache = new Map<string, { at: number; sentences: string[] }>();
+
+function summaryCacheRead(key: string): string[] | undefined {
+  const hit = summaryCache.get(key);
+  if (!hit) return undefined;
+  if (Date.now() - hit.at > SUMMARY_CACHE_TTL_MS) {
+    summaryCache.delete(key);
+    return undefined;
+  }
+  // 命中即刷新位置：Map 的迭代顺序就是最近使用顺序，删了重插就挪到队尾。
+  summaryCache.delete(key);
+  summaryCache.set(key, hit);
+  return hit.sentences;
+}
+
+function summaryCacheWrite(key: string, sentences: string[]): void {
+  summaryCache.delete(key);
+  summaryCache.set(key, { at: Date.now(), sentences });
+  while (summaryCache.size > SUMMARY_CACHE_MAX) {
+    const oldest = summaryCache.keys().next();
+    if (oldest.done) break;
+    summaryCache.delete(oldest.value);
+  }
+}
+
 function splitSummary(raw: string, maxChars: number): string[] {
   const cleaned = String(raw ?? '')
     .replace(/```[\s\S]*?```/g, ' ')

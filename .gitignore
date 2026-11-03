@@ -6,3 +6,4 @@ runtime/electron-helper/*.bak*
 assets/webm/
 assets/preview/
 release/
+!packaging/bridge-plugin/lib/

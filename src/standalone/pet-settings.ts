@@ -67,7 +67,7 @@ const patchSchema = z
     whisperIntervalMin: z.number().int().min(1).max(1440).optional(),
     // 秒级间隔：右键菜单「碎碎念 → 自定义间隔…」走的小窗口用这个（哥哥要「能手动输入秒数」）。
     // 与上面的分钟字段写的是**同一个** eventsRefreshSec.whisper，两个入口不会打架。
-    whisperIntervalSec: z.number().int().min(60).max(86_400).optional(),
+    whisperIntervalSec: z.number().int().min(30).max(86_400).optional(),
     // 【本鱼 · 11-02】陪伴间隔（分钟）：右键「陪伴：自定义…」的小窗用
     companionIntervalMin: z.number().int().min(1).max(1440).optional(),
     // 全局快捷键（Electron accelerator 写法）。空串 = 用默认 Alt+T / Alt+G / Alt+S。
@@ -230,10 +230,10 @@ export function viewOf(config: unknown): Record<string, unknown> {
     // 间隔只认配置里的 eventsRefreshSec.whisper（秒）→ 换成分钟显示（页面用分钟更直观）
     whisperIntervalMin: Math.max(
       1,
-      Math.round(asInt(asDict(root.eventsRefreshSec)?.whisper, 60, 60, 86_400) / 60),
+      Math.round(asInt(asDict(root.eventsRefreshSec)?.whisper, 60, 30, 86_400) / 60),
     ),
     // 秒级入口（右键菜单的小窗用）：同一个字段的原始秒数
-    whisperIntervalSec: asInt(asDict(root.eventsRefreshSec)?.whisper, 60, 60, 86_400),
+    whisperIntervalSec: asInt(asDict(root.eventsRefreshSec)?.whisper, 60, 30, 86_400),
     // 陪伴间隔（分钟）：配置里是 companion.intervalMs（毫秒），没有就按默认 1 分钟回显
     companionIntervalMin: Math.max(1, Math.round(asInt(asDict(root.companion)?.intervalMs, 60_000, 10_000, 86_400_000) / 60_000)),
     // 快捷键：读不到就是空串（= 用默认），页面上显示成空让哥哥知道"没改过"
