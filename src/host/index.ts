@@ -230,6 +230,7 @@ import { createStoryCache } from './bili-story';
 import { createSearchRunner, failedNote, parseToolCall, SEARCH_TOOL_HINT } from './chat-search';
 import { pruneDir } from './retention';
 import { readTailLines } from './log-tail';
+import { looksLikeEcho } from './memory-echo';
 import { playbackWatchdogMs, systemPlayerCommand } from './core/sound-player';
 import { createLyricAgent } from './lyric-agent';
 import {
@@ -2617,12 +2618,31 @@ export function apply(ctx: any): void {
     dropHint('ear');
     return 'idle';
   };
+  /**
+   * 【汐儿 · 11-16 夜 m24648】哥哥说「听话之后、说话之前还是会闪一秒【在想】」。
+   * 原因：短句两秒就出话，提示层刚亮就灭，肉眼看就是闪一下。
+   * 改法：**延迟 1.2 秒再亮**，中途只要切到别的状态（比如开始说话）就取消——
+   * 真等得久才看得见，快答的短句根本看不见。
+   */
+  let thinkHintTimer: ReturnType<typeof setTimeout> | null = null;
+  const clearThinkHint = (): void => {
+    if (thinkHintTimer !== null) {
+      clearTimeout(thinkHintTimer);
+      thinkHintTimer = null;
+    }
+  };
   const setEarPhase = (phase: EarPhase): void => {
     earPhase = phase;
     earPhaseAt = Date.now();
+    clearThinkHint();
     if (phase === 'listen') pushHint('ear', '【在听】', 'task');
-    else if (phase === 'think') pushHint('ear', '【在想】', 'task');
-    else dropHint('ear');
+    else if (phase === 'think') {
+      thinkHintTimer = setTimeout(() => {
+        thinkHintTimer = null;
+        if (earPhaseNow() === 'think') pushHint('ear', '【在想】', 'task');
+      }, 1200);
+      thinkHintTimer.unref?.();
+    } else dropHint('ear');
     // 【汐儿 · 11-16 晚 m24151】哥哥看到「头顶气泡 + 提示气泡」两个一起挂：
     // 头顶那个是听.py 自己写的「我在听…（再按一下停）」（60 秒），和我们的提示层重复。
     // 一进入「在听 / 在想」，就把头顶气泡收掉，只留提示层那一行。
@@ -3958,9 +3978,22 @@ export function apply(ctx: any): void {
     rounds?: number,
   ): Promise<ChatMemoryMessage[]> => {
     const nowMs = Date.now();
-    const turns = (await memoryStore.today(200)).filter(
-      (t) => t.source === source && nowMs - t.at <= CHAT_WINDOW_MS,
-    );
+    const all = await memoryStore.today(200);
+    let turns = all.filter((t) => t.source === source && nowMs - t.at <= CHAT_WINDOW_MS);
+    // 【汐儿 · 11-16 夜 m24648】历史里那些「照念屏幕」的旧话不能再喂回去——
+    // 她已经念过一轮（验收/气泡/横纹），一读回去就接着念，重启后第一句尤其明显。
+    if (source === 'chat') {
+      const notes = all
+        .filter((t) => t.source === 'watch' && nowMs - t.at <= 10 * 60 * 1000)
+        .map((t) => t.text);
+      if (notes.length > 0) {
+        const kept = turns.filter((t) => !(t.role === 'pet' && looksLikeEcho(t.text, notes)));
+        if (kept.length !== turns.length) {
+          noteBubble(`echo-drop history ${turns.length - kept.length}`);
+        }
+        turns = kept;
+      }
+    }
     const mapped = turns.map((t) => ({
       role: t.role === 'pet' ? ('assistant' as const) : ('user' as const),
       content: t.text,
@@ -3978,13 +4011,18 @@ export function apply(ctx: any): void {
       (t) => t.source === 'watch' && nowMs - t.at <= SIGHT_WINDOW_MS,
     );
     if (turns.length === 0) return '';
+    // 【汐儿 · 11-16 夜 m24648】只留**最新 3 条**：10 分钟能有十几条笔记，
+    // 全塞进去她就开始报菜名；而且那些字会被她照念出来（见 memory-echo.ts）。
     const lines = turns
+      .slice(-3)
       .map((t) => `- ${hhmm(t.at)} ${t.text.replace(/^(?:看护|看到)\s+\d{1,2}:\d{2}\s*/u, '')}`)
       .join('\n');
     return (
       `\n\n【你刚才在屏幕上看到的（这是你自己看到的，不是用户说的）】\n${lines}\n` +
       '（这些不是他说的、也不是别人转告的，是你自己瞄到的。他问「你能看见吗 / 刚才在看什么」就直接说' +
-      '「看见你在……」并举一条具体的；他没问就别硬聊屏幕。逐条念出来会像播报，挑对得上的那一件自然带一句。）'
+      '「看见你在……」并举一条具体的；他没问就别硬聊屏幕。' +
+      '**屏幕上的字句不要照抄、不要念出来**——报错、清单、测试结果、待办都是别人的活儿，' +
+      '你要用自己的话讲一句「你在做什么」就够了。逐条念出来会像播报。）'
     );
   };
 
@@ -4205,7 +4243,18 @@ export function apply(ctx: any): void {
       }
       // 记忆只存正文（配图属展示层，不进上下文——否则下次请求会把标记当历史读回去）
       await memoryStore.remember({ role: 'user', text, source: 'chat' });
-      await memoryStore.remember({ role: 'pet', text: generated.text, source: 'chat' });
+      // 【汐儿 · 11-16 夜 m24648】如果这句基本是在照念屏幕上的字（验收清单、报错、测试结果），
+      // 不存进「她说的话」——存了就变成下一轮的历史，她会自己喂自己，一句接一句念下去。
+      {
+        const sightNotes = (await memoryStore.today(200))
+          .filter((t) => t.source === 'watch' && Date.now() - t.at <= 10 * 60 * 1000)
+          .map((t) => t.text);
+        if (looksLikeEcho(generated.text, sightNotes)) {
+          noteBubble('echo-skip memory');
+        } else {
+          await memoryStore.remember({ role: 'pet', text: generated.text, source: 'chat' });
+        }
+      }
       // 【汐儿 · 11-16 晚 m24151】**回话本身就是等待的结束**：先把「在听 / 在想」撤掉再说话。
       // 不撤的话，下面的 sayWithVoice 走 normal 优先级，会被 earMuted() 的闸挡回来
       //（ear-busy，不出声也不冒泡）→ show() 永远不执行 → 状态永远停在【在想】= 死锁。

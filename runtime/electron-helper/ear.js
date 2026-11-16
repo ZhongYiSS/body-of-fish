@@ -159,8 +159,10 @@ function handleLine(line) {
     return;
   }
   if (event.event === 'text') {
+    // 【汐儿 · 11-16 夜 m24648】这里不再补报一次 think：
+    // rec-stop 已经报过，宿主进入 chatWithPet 也会自己设 think；
+    // 重复报一次会把延迟 1.2 秒的【在想】重新计时，看着像「说话前又闪一下」。
     log('听到：' + event.text);
-    reportEarPhase('think');
     return;
   }
   if (event.event === 'reply') {

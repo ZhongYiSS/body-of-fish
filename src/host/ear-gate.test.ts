@@ -67,8 +67,9 @@ describe('在听 / 在想：三个状态都要落到提示层', () => {
     assert.match(earCode, /async function postEarPhase\(phase\)/);
     assert.match(earCode, /await fetch\(petBase\(\) \+ '\/ear'/);
     assert.equal(earCode.split("reportEarPhase('listen');").length - 1, 1, '录音开始要报一次 listen');
-    // 11-16 晚 m24332：按停麦就报 think（rec-stop），出字再报一次 → 两次。
-    assert.equal(earCode.split("reportEarPhase('think');").length - 1, 2, '按停 + 出字各报一次 think');
+    // 11-16 晚 m24332：按停麦就报 think（rec-stop）。
+    // 【11-16 夜 m24648】出字那次不再补报——重复报会把延迟的【在想】重新计时，看着像闪。
+    assert.equal(earCode.split("reportEarPhase('think');").length - 1, 1, '只有按停麦报 think');
     // 11-16 晚第二轮自查：除了 reply / error，脚本进程自己退出或报错也要撤（4 次）——
     // 不撤的话心跳会一直替它喊「在听」，宿主 45 秒兜底永远等不到，就成永久闭嘴。
     assert.equal(
