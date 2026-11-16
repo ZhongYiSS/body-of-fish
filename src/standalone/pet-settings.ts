@@ -70,8 +70,9 @@ const patchSchema = z
     // 秒级间隔：右键菜单「碎碎念 → 自定义间隔…」走的小窗口用这个（哥哥要「能手动输入秒数」）。
     // 与上面的分钟字段写的是**同一个** eventsRefreshSec.whisper，两个入口不会打架。
     whisperIntervalSec: z.number().int().min(30).max(86_400).optional(),
-    // 【本鱼 · 11-02】看一眼间隔（分钟）：右键「看一眼：自定义…」的小窗用
-    companionIntervalMin: z.number().int().min(1).max(1440).optional(),
+    // 【本鱼 · 11-02 / 汐儿 · 11-16】看一眼间隔（秒）：右键「一眼看：自定义时间…」的小窗用。
+    // 哥哥 11-16 报「写着 30–86400 秒、实际只能填分钟，最小 1 分钟」→ 统一改成秒、范围 20–600。
+    companionIntervalSec: z.number().int().min(20).max(600).optional(),
     // 全局快捷键（Electron accelerator 写法）。空串 = 用默认 Alt+T / Alt+G / Alt+S。
     // 只允许 "修饰键+主键" 这种形状，别让用户把随便一串字符写进配置（写坏了热键就整组注册失败）。
     earHotkey: z.union([z.literal(''), z.string().trim().max(32).regex(HOTKEY_PATTERN, '快捷键要写成 Alt+T 这样')]).optional(),
@@ -298,8 +299,14 @@ export function viewOf(config: unknown): Record<string, unknown> {
     ),
     // 秒级入口（右键菜单的小窗用）：同一个字段的原始秒数
     whisperIntervalSec: asInt(asDict(root.eventsRefreshSec)?.whisper, 60, 30, 86_400),
-    // 陪伴间隔（分钟）：配置里是 companion.intervalMs（毫秒），没有就按默认 1 分钟回显
-    companionIntervalMin: Math.max(1, Math.round(asInt(asDict(root.companion)?.intervalMs, 60_000, 10_000, 86_400_000) / 60_000)),
+    // 陪伴间隔（秒）：配置里是 companion.intervalMs（毫秒），没有就按默认 60 秒回显。
+    // 【汐儿 · 11-16】老配置存过分钟级的大数（比如一小时 = 3_600_000），asInt 越界会直接回退成默认值、
+    // 界面就显示 1 分钟；这里改成「读出来再夹进 20–600」，让界面和真实值差得别太离谱。
+    companionIntervalSec: (() => {
+      const rawMs = asDict(root.companion)?.intervalMs;
+      const ms = typeof rawMs === 'number' && Number.isFinite(rawMs) && rawMs > 0 ? rawMs : 60_000;
+      return Math.max(20, Math.min(600, Math.round(ms / 1000)));
+    })(),
     // 快捷键：读不到就是空串（= 用默认），页面上显示成空让哥哥知道"没改过"
     earHotkey: asText(asDict(root.hotkeys)?.earHotkey),
     peekHotkey: asText(asDict(root.hotkeys)?.peekHotkey),
@@ -405,10 +412,10 @@ export function applyPatch(config: Dict, patch: PetSettingsPatch): Dict {
     events.whisper = patch.whisperIntervalSec;
     next.eventsRefreshSec = events;
   }
-  // 陪伴间隔（分钟）→ companion.intervalMs（毫秒）：和右键菜单档位同一个字段
-  if (patch.companionIntervalMin !== undefined) {
+  // 陪伴间隔（秒）→ companion.intervalMs（毫秒）：和右键菜单档位同一个字段
+  if (patch.companionIntervalSec !== undefined) {
     const companion: Dict = { ...(asDict(next.companion) ?? {}) };
-    companion.intervalMs = patch.companionIntervalMin * 60_000;
+    companion.intervalMs = patch.companionIntervalSec * 1000;
     next.companion = companion;
   }
   // 快捷键：写顶层 hotkeys 段。空串 = 删掉这个键，让 ear.js 用它的默认值

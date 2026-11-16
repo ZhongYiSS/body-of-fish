@@ -1327,8 +1327,11 @@ export function apply(ctx: any): void {
         // 两步走：先识图拿"看到了什么"，再交给**对话模型**说一句人话（而不是把描述原样念出来）。
         // 任何一步没接上/失败都返回空串 —— companion 把空串当"这一拍不说话"，不会报错也不会冒气泡。
         look: async (_thumb, _prompt) => {
-          // 【本鱼 · 11-02】陪伴也要有「正在看」的状态：识图慢的时候别让哥哥以为卡死了
-          await statusBubble('本鱼正在偷看…', 180_000);
+          // 【本鱼 · 11-02】陪伴也要有「正在看」的状态：识图慢的时候别让哥哥以为卡死了。
+          // 【汐儿 · 11-16 m23786】哥哥报「没开也挂着正在偷看」：原来 180 秒、成功之后也没人清。
+          // 现在封顶 30 秒，并在这一拍结束时用 finally 撤掉。
+          await statusBubble('本鱼正在偷看…', 30_000);
+          try {
           const eyes = servicesProvider('main').eyes.available();
           if (!eyes.ready) {
             debugTrace('[look] 识图没就绪：' + String(eyes.reason?.message ?? eyes.reason?.code ?? ''));
@@ -1400,6 +1403,10 @@ export function apply(ctx: any): void {
             }
           })();
           return generated.text;
+          } finally {
+            // 不管看到没看到、说没说出口，这一拍结束就把「正在偷看」撤掉
+            dropHint('status');
+          }
         },
         bubble: async (text, opts) => {
           await servicesProvider('main').bubble.say({ petId: 'main', text, ...(opts?.image ? { image: opts.image } : {}) });
@@ -2179,7 +2186,8 @@ export function apply(ctx: any): void {
     // 【汐儿 · 11-15 23:16】一眼看**不再打断**正在说的话（哥哥定：陪伴、一眼看不该掐语音）。
     touchUser();
     // 先冒「正在偷看」：截屏 + 识图 + 对话要好几秒，不冒的话哥哥只会觉得「没反应」。
-    await statusBubble('本鱼正在偷看…', 180_000);
+    // 【汐儿 · 11-16】封顶 30 秒；成功说完立刻撤掉（失败那句 18 秒自己会走）。
+    await statusBubble('本鱼正在偷看…', 30_000);
     const fail = async (message: string): Promise<{ ok: false; message: string }> => {
       await statusBubble(`看一眼失败：${message}`, 18_000);
       return { ok: false, message };
@@ -2218,6 +2226,7 @@ export function apply(ctx: any): void {
       if (!text) return fail('模型没说话');
       // 看一眼和陪伴一样是最高的优先级（哥哥 11-09 晚定的规矩）
       await sayWithVoice('main', text, generated.image, 'high');
+      dropHint('status');
       // 「看一眼」说出口的话也进对话历史（和陪伴、语音同一个池）
       void memoryStore.remember({ role: 'pet', text, source: 'chat' }).catch(() => {});
       digestHighlight(`${hhmm(Date.now())} ${text}`);

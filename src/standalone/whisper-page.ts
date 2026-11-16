@@ -15,7 +15,7 @@ export const whisperPage = `<!doctype html>
 <label for="seconds">间隔（秒）</label>
 <input id="seconds" type="number" min="30" max="86400" step="1" required>
 <p class="hint" id="current">正在读取当前间隔…</p>
-<p class="hint">范围 30–86400 秒（半分钟到 24 小时）。实际触发会前后浮动约 20%，不会整点打卡。</p>
+<p class="hint" id="range">范围 30–86400 秒（半分钟到 24 小时）。实际触发会前后浮动约 20%，不会整点打卡。</p>
 <footer><button id="save" type="submit">保存</button><p id="status" role="status" aria-live="polite"></p></footer>
 </form></main></body></html>
 `;
@@ -70,17 +70,20 @@ export const whisperScript = `
     document.title = '看一眼间隔';
     const local = document.querySelector('.local'); if (local) local.textContent = '独立桌宠 / 一眼看';
     const h1 = document.querySelector('h1'); if (h1) h1.textContent = '看一眼隔多久看一次';
-    const label = document.querySelector('label'); if (label) label.textContent = '间隔（分钟）';
-    field.min = '1'; field.max = '1440';
+    const label = document.querySelector('label'); if (label) label.textContent = '间隔（秒）';
+    // 【汐儿 · 11-16】哥哥要 20–600 秒（原来按分钟、最小 1 分钟，和下面这句提示对不上）
+    field.min = '20'; field.max = '600';
+    const range = get('range');
+    if (range) range.textContent = '范围 20–600 秒（20 秒到 10 分钟）。实际触发会前后浮动约 20%。';
     const intro = document.querySelector('.intro'); if (intro) intro.textContent = '一眼看开着时，按这个间隔截一张屏幕看一眼；不是游戏陪伴那种实时盯屏。';
   }
   async function load() {
     if (!token) throw new Error(companion ? '请从桌宠右键菜单「一眼看 → 自定义时间…」打开。' : '请从桌宠右键菜单「碎碎念 → 自定义间隔…」打开。');
     const data = await request('GET');
     if (companion) {
-      const minutes = Math.max(1, Math.round(Number(data.companionIntervalMin) || 1));
-      field.value = String(minutes);
-      current.textContent = '当前：每 ' + minutes + ' 分钟';
+      const seconds = Math.max(20, Math.min(600, Math.round(Number(data.companionIntervalSec) || 60)));
+      field.value = String(seconds);
+      current.textContent = '当前：每 ' + seconds + ' 秒';
       message('', null);
       return;
     }
@@ -96,10 +99,10 @@ export const whisperScript = `
     message('正在保存…', null);
     try {
       if (companion) {
-        const data = await request('POST', { companionIntervalMin: Number(field.value) });
-        const minutes = Math.max(1, Math.round(Number(data.companionIntervalMin) || Number(field.value)));
-        field.value = String(minutes);
-        current.textContent = '当前：每 ' + minutes + ' 分钟';
+        const data = await request('POST', { companionIntervalSec: Number(field.value) });
+        const seconds = Math.max(20, Math.min(600, Math.round(Number(data.companionIntervalSec) || Number(field.value))));
+        field.value = String(seconds);
+        current.textContent = '当前：每 ' + seconds + ' 秒';
         message('已保存，下一次看一眼按新间隔走', 'ok');
         return;
       }
