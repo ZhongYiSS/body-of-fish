@@ -32,6 +32,8 @@ export const CAPTURE_W = 1536;
 export const CAPTURE_H = 960;
 const CAPTURE_FPS = 12;
 const FRAME_BYTES = CAPTURE_W * CAPTURE_H * 3;
+/** 抓图 / 编码的 ffmpeg 硬超时（11-16 体检 B3）：卡死就掐掉，别把调用它的那条路一起挂住 */
+const FFMPEG_TIMEOUT_MS = 15_000;
 
 /**
  * 单张尺寸（11-16 m21257 去宫格后只剩这一种）。
@@ -283,6 +285,8 @@ export interface WatchOptions {
   readonly shouldStillStop?: () => boolean;
   /** 因为「一直没变化」自己停下来时回调一次（告别一句用） */
   readonly onStillStop?: () => void;
+  /** 抓屏连续起不来、决定彻底停下时回调一次（11-16 体检 B3：让菜单和取景轮询跟着收） */
+  readonly onCaptureLost?: () => void;
   /** 调参（突变评分、尺寸、累计、三档节奏）；不传就用代码里标定过的默认 */
   readonly tuning?: Partial<WatchTuning>;
   /**
@@ -522,12 +526,28 @@ export function grabStillPng(ffmpegPath?: string): Promise<Buffer> {
     ], { windowsHide: true });
     const chunks: Buffer[] = [];
     let err = '';
+    let done = false;
+    /** 收尾只走一次：超时掐死之后 close 还会再来一遍，别重复 settle */
+    const settle = (fn: () => void): void => {
+      if (done) return;
+      done = true;
+      clearTimeout(timer);
+      fn();
+    };
+    const timer = setTimeout(() => {
+      settle(() => {
+        try { ff.kill(); } catch { /* 已经退了 */ }
+        reject(new Error('抓图超时'));
+      });
+    }, FFMPEG_TIMEOUT_MS);
     ff.stdout.on('data', (chunk: Buffer) => chunks.push(chunk));
     ff.stderr.on('data', (chunk: Buffer) => { err += String(chunk); });
-    ff.on('error', reject);
+    ff.on('error', (error) => settle(() => reject(error)));
     ff.on('close', (code) => {
-      if (code === 0 && chunks.length > 0) resolve(Buffer.concat(chunks));
-      else reject(new Error(err.trim() || `抓图退出 ${code}`));
+      settle(() => {
+        if (code === 0 && chunks.length > 0) resolve(Buffer.concat(chunks));
+        else reject(new Error(err.trim() || `抓图退出 ${code}`));
+      });
     });
   });
 }
@@ -547,6 +567,45 @@ export function createWatchMode(options: WatchOptions): WatchHandle {
   let lastDeliverAt: number | null = null;
   /** 每次启停换代，防止 stop 之后残留的异步副作用 */
   let generation = 0;
+
+  /**
+   * 【汐儿 · 11-16 体检 B3】抓屏进程死了要自己爬起来：2 秒 / 5 秒 / 15 秒各试一次，
+   * 连着三次都不行就收手并通知外面（菜单跟着变、取景轮询也停）。
+   * 以前只把 running 置 false —— 外面看着「陪伴还开着」，其实一张图都不出了。
+   */
+  let wantRun = false;
+  let captureUpAt = 0;
+  let restartTimer: ReturnType<typeof setTimeout> | null = null;
+  let restartCount = 0;
+
+  function clearRestart(): void {
+    if (restartTimer !== null) {
+      clearTimeout(restartTimer);
+      restartTimer = null;
+    }
+  }
+
+  function scheduleRestart(reason: string): void {
+    if (!wantRun || restartTimer !== null) return;
+    restartCount += 1;
+    if (restartCount > 3) {
+      wantRun = false;
+      log(`[watch] 抓屏连着三次没起来（${reason}），先停下——要接着陪就手动再开一次`);
+      options.onCaptureLost?.();
+      return;
+    }
+    const delay = restartCount === 1 ? 2_000 : restartCount === 2 ? 5_000 : 15_000;
+    log(`[watch] 抓屏断了（${reason}），${Math.round(delay / 1000)} 秒后重试（第 ${restartCount} 次）`);
+    restartTimer = setTimeout(() => {
+      restartTimer = null;
+      if (!wantRun) return;
+      if (!spawnCapture()) {
+        scheduleRestart('重试起不来');
+        return;
+      }
+      running = true;
+    }, delay);
+  }
 
   let pending: Buffer[] = [];
   let pendingLen = 0;
@@ -576,6 +635,8 @@ export function createWatchMode(options: WatchOptions): WatchHandle {
 
   function stop(): void {
     generation += 1;
+    wantRun = false;
+    clearRestart();
     running = false;
     if (child) {
       const c = child;
@@ -647,12 +708,15 @@ export function createWatchMode(options: WatchOptions): WatchHandle {
       if (mine !== generation) return;
       running = false;
       if (code !== 0 && code !== null) log(`[watch] ffmpeg 退出 code=${code}`);
+      scheduleRestart(`退出 code=${code ?? 'null'}`);
     });
     child.on('error', (error) => {
       if (mine !== generation) return;
       running = false;
       log(`[watch] ffmpeg 起不来：${error.message}`);
+      scheduleRestart('起不来');
     });
+    captureUpAt = Date.now();
     return true;
   }
 
@@ -660,6 +724,9 @@ export function createWatchMode(options: WatchOptions): WatchHandle {
     stop();
     pace = next;
     generation += 1;
+    wantRun = true;
+    restartCount = 0;
+    clearRestart();
     startedAt = Date.now();
     lastChangeAt = Date.now();
     if (!spawnCapture()) return { ok: false, message: 'ffmpeg 起不来（抓屏失败）' };
@@ -670,6 +737,8 @@ export function createWatchMode(options: WatchOptions): WatchHandle {
 
   function onFrame(buf: Buffer): void {
     frameCount += 1;
+    // 抓屏真稳了 60 秒才把重试计数清零：否则一开一崩的抖动会无限重试下去。
+    if (captureUpAt !== 0 && Date.now() - captureUpAt > 60_000) restartCount = 0;
     // 状态行（m16859）：一眼看出「帧在跑但一张没出」这种饿死，别再靠猜
     const nowWall = Date.now();
     if (nowWall - lastStatusLogAt >= 60_000) {
@@ -849,12 +918,27 @@ export function createWatchMode(options: WatchOptions): WatchHandle {
       ]);
       const chunks: Buffer[] = [];
       let err = '';
+      let done = false;
+      const settle = (fn: () => void): void => {
+        if (done) return;
+        done = true;
+        clearTimeout(timer);
+        fn();
+      };
+      const timer = setTimeout(() => {
+        settle(() => {
+          try { ff.kill(); } catch { /* 已经退了 */ }
+          reject(new Error('png 编码超时'));
+        });
+      }, FFMPEG_TIMEOUT_MS);
       ff.stdout.on('data', (chunk: Buffer) => chunks.push(chunk));
       ff.stderr.on('data', (chunk: Buffer) => { err += chunk.toString(); });
-      ff.on('error', reject);
+      ff.on('error', (error) => settle(() => reject(error)));
       ff.on('close', (code) => {
-        if (code === 0 && chunks.length > 0) resolve(Buffer.concat(chunks));
-        else reject(new Error(err.trim() || `png 编码退出 ${code}`));
+        settle(() => {
+          if (code === 0 && chunks.length > 0) resolve(Buffer.concat(chunks));
+          else reject(new Error(err.trim() || `png 编码退出 ${code}`));
+        });
       });
       ff.stdin.end(raw);
     });

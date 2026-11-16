@@ -135,6 +135,14 @@ test('validatePetSettings：气泡偏移量是小数也收，写盘时取整（1
   assert.deepEqual(next.hint, { x: 12, y: -4, size: 15 });
 });
 
+test('气泡拖拽的边界必须和 schema 一致（11-16 体检 B4）', () => {
+  // 老 bug：页面按预览框宽度算上限（能拖到 448），schema 只收到 400 → 拖偏一点保存必报「设置无效」。
+  assert.match(petSettingsScript, /clampHint\(drag\.ox \+ \(ev\.clientX - drag\.x\), -400, 400\)/u);
+  assert.match(petSettingsScript, /clampHint\(drag\.oy \+ \(ev\.clientY - drag\.y\), -400, 400\)/u);
+  assert.throws(() => validatePetSettings({ hintX: 448 }), /出错的字段：hintX/u);
+  assert.deepEqual(validatePetSettings({ hintX: 400, hintY: -400 }), { hintX: 400, hintY: -400 });
+});
+
 test('validatePetSettings：越界、未知键、类型错都拒绝，并给同一句可操作提示', () => {
   assert.throws(() => validatePetSettings({ size: 20 }), /桌宠设置无效/);
   assert.throws(() => validatePetSettings({ marginX: 5000 }), /桌宠设置无效/);

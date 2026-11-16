@@ -103,6 +103,7 @@ import {
   mkdirSync,
   realpathSync,
   readFileSync,
+  renameSync,
   rmSync,
   symlinkSync,
   unlinkSync,
@@ -1765,21 +1766,36 @@ export function apply(ctx: any): void {
     watchBusy = true;
     const t0 = Date.now();
     pushHint('watch', '【在看】', 'task');
-    // 前台窗口 + 空闲时长 + 浏览器网址一次拿到（本鱼 · 11-10 m18596 / 11-11 m19041）：
-    // 窗口标题里往往就是游戏名，浏览器里就是页面标题，地址栏还能给出网址——
-    // 有了这些才分得清「在打游戏 / 在看视频 / 在看网页」，也才有名字去查资料。
-    // 字符串不经过坐标系，所以没有 11-09 那个 DPI 坑。
-    const fg = await readForeground();
-    if (fg.idleMs >= 0) lastIdleMs = fg.idleMs;
-    lastFg = fg;
-    await refreshTarget();
-    // 【汐儿 · 11-16 m21257/m21304】不再分游戏/视频/网页三套逻辑，也不再「先查资料再说话」：
-    // 名字就是窗口标题（剥掉浏览器尾巴），查不查由她自己决定（提示词里教她输出检索标记）。
-    const targetWin = lastTargetWin;
-    const title = targetWin === null ? pageName(fg.title) : pageName(targetWin.title);
-    const winLine = targetWin === null ? '（整屏，没读到具体窗口）' : lastTargetLabel;
-    // B站剧情梗概留着（哥哥 11-16 m21310「b站的部分我支持你留」）：有网址才取，拿不到就 null。
-    const story = fg.url.includes('bilibili.com/video/') ? await storyCache.get(fg.url, title) : null;
+    // 【汐儿 · 11-16 体检 B3】准备段以前在 try 外面：readForeground / refreshTarget / storyCache
+    // 任何一个抛异常，watchBusy 就永远是 true（之后每张图都被「上一张还没处理完」挡掉），
+    // 【在看】也一直挂着。现在全部圈进来，出错走同一个出口。
+    let fg: ForegroundInfo;
+    let targetWin: WindowInfo | null = null;
+    let title = '';
+    let winLine = '';
+    let story: Awaited<ReturnType<typeof storyCache.get>> = null;
+    try {
+      // 前台窗口 + 空闲时长 + 浏览器网址一次拿到（本鱼 · 11-10 m18596 / 11-11 m19041）：
+      // 窗口标题里往往就是游戏名，浏览器里就是页面标题，地址栏还能给出网址——
+      // 有了这些才分得清「在打游戏 / 在看视频 / 在看网页」，也才有名字去查资料。
+      // 字符串不经过坐标系，所以没有 11-09 那个 DPI 坑。
+      fg = await readForeground();
+      if (fg.idleMs >= 0) lastIdleMs = fg.idleMs;
+      lastFg = fg;
+      await refreshTarget();
+      // 【汐儿 · 11-16 m21257/m21304】不再分游戏/视频/网页三套逻辑，也不再「先查资料再说话」：
+      // 名字就是窗口标题（剥掉浏览器尾巴），查不查由她自己决定（提示词里教她输出检索标记）。
+      targetWin = lastTargetWin;
+      title = targetWin === null ? pageName(fg.title) : pageName(targetWin.title);
+      winLine = targetWin === null ? '（整屏，没读到具体窗口）' : lastTargetLabel;
+      // B站剧情梗概留着（哥哥 11-16 m21310「b站的部分我支持你留」）：有网址才取，拿不到就 null。
+      story = fg.url.includes('bilibili.com/video/') ? await storyCache.get(fg.url, title) : null;
+    } catch (error) {
+      debugTrace('[watch] 取景准备失败：' + String(error instanceof Error ? error.message : error));
+      watchBusy = false;
+      dropHint('watch');
+      return;
+    }
     let spoke = '';
     let gateBusy = false;
     /**
@@ -2011,7 +2027,8 @@ export function apply(ctx: any): void {
   const startTargetPoll = (): void => {
     if (targetTimer !== null) return;
     targetTimer = setInterval(() => {
-      if (watch === null || watchMode() === 'full') return;
+      // 陪伴没在跑（停了 / 抓屏连着起不来）就别再每 5 秒起一次 PowerShell（11-16 体检 B3）。
+      if (watch === null || watchMode() === 'full' || !watch.status().running) return;
       void refreshTarget().catch(() => {});
     }, 5_000);
     targetTimer.unref?.();
@@ -2072,6 +2089,11 @@ export function apply(ctx: any): void {
           void servicesProvider('main')
             .bubble.say({ petId: 'main', text: '我先眯会儿，有事叫我', source: 'companion', duration: 10_000 })
             .catch(() => {});
+        },
+        // 抓屏连着三次没起来：菜单的 ✓ 要跟着变回「关」，取景轮询也停掉（11-16 体检 B3）。
+        onCaptureLost: () => {
+          stopTargetPoll();
+          refreshPetMenu();
         },
       });
     }
@@ -2342,12 +2364,27 @@ export function apply(ctx: any): void {
           /* 回调里出错不该把播放搞挂 */
         }
       };
+      /** 删播放用的临时音频：Windows 上播放器可能还握着句柄，删不掉就改名成 .tmp 留给下次启动清 */
+      const removeVoiceFile = (target: string): void => {
+        if (target === '') return;
+        try {
+          rmSync(target, { force: true });
+        } catch (error) {
+          try {
+            renameSync(target, `${target}.tmp`);
+          } catch {
+            noteVoiceIssue(
+              `voice-file 删不掉也改不了名 ${target} | ${error instanceof Error ? error.message : String(error)}`,
+            );
+          }
+        }
+      };
       const finish = (): void => {
         if (settled) return;
         settled = true;
         clearWatchdog();
         if (activePlay !== null && (current === null || activePlay.child === current)) activePlay = null;
-        if (file !== '') rmSync(file, { force: true });
+        removeVoiceFile(file);
         resolve();
       };
       try {
@@ -2369,6 +2406,9 @@ export function apply(ctx: any): void {
       const expectedMs = audioDurationMs(audio);
       const budgetMs = playbackWatchdogMs(expectedMs);
       const run = (command: string, args: string[], via: string): void => {
+        // ffplay 起不来 → fallback() 会再调一次 run()：旧看门狗必须先清掉，
+        // 否则它到点会对已经退出的子进程开火，把新一轮播放的 finish() 提前触发（11-15 体检 B2）。
+        clearWatchdog();
         const startedAtMs = Date.now();
         let stderrText = '';
         let failed = false;
@@ -2656,6 +2696,28 @@ export function apply(ctx: any): void {
   let speakActive: SpeakSpec | null = null;
   let speakQueue: SpeakJob[] = [];
   const speakSpecs = new Map<string, SpeakSpec>();
+  /**
+   * 【汐儿 · 11-16 体检 B1】**丢掉一个还没轮到的任务时必须兑现它的 Promise**。
+   * 原来四条丢弃路径（过期 / 被同类顶掉 / 队列满 / 手动打断）只 `speakSpecs.delete()`，
+   * 于是 `await sayWithVoice(...)`、`await centerSay(...)`、`await speakOnce()` 永远挂着，
+   * 桥的 `POST /say` 也就永远不回包。凡是「任务离队」，一律走这里。
+   */
+  /** 取出一个轮到的任务：离开排队表，但**不算丢**——它马上要播，Promise 由播完那边兑现。 */
+  const takeSpeakSpec = (key: string): SpeakSpec | undefined => {
+    const spec = speakSpecs.get(key);
+    speakSpecs.delete(key);
+    return spec;
+  };
+  const dropSpeakJob = (key: string, outcome: SpeakOutcome): void => {
+    const gone = speakSpecs.get(key);
+    if (gone === undefined) return;
+    speakSpecs.delete(key);
+    try {
+      gone.settle?.(outcome);
+    } catch {
+      /* 回调出错不该把队列搞挂 */
+    }
+  };
   const speakBusy = (): boolean => speakActive !== null;
   const asJob = (spec: SpeakSpec): SpeakJob => ({
     key: spec.key,
@@ -2689,7 +2751,7 @@ export function apply(ctx: any): void {
     const { keep, expired } = expirePending(speakQueue, now, voiceStaleMs());
     if (expired.length > 0) {
       for (const gone of expired) {
-        speakSpecs.delete(gone.key);
+        dropSpeakJob(gone.key, { ok: false, message: 'expired' });
         noteVoiceIssue(`expire key=${gone.key} priority=${gone.priority} waited=${now - gone.enqueuedAt}ms`);
         // 作废不等于白丢：内容攒起来并进下一句（哥哥 11-15）
         if (gone.kind === 'say') carrySpeak(gone.text);
@@ -2699,8 +2761,7 @@ export function apply(ctx: any): void {
     const picked = pickNext(speakQueue);
     if (picked.next === undefined) return;
     speakQueue = picked.rest;
-    const spec = speakSpecs.get(picked.next.key);
-    speakSpecs.delete(picked.next.key);
+    const spec = takeSpeakSpec(picked.next.key);
     if (spec === undefined) {
       pumpSpeak();
       return;
@@ -2758,7 +2819,7 @@ export function apply(ctx: any): void {
     if (spec.replacePrefix !== undefined && spec.replacePrefix !== '') {
       for (let i = speakQueue.length - 1; i >= 0; i -= 1) {
         if (speakQueue[i].key.startsWith(spec.replacePrefix)) {
-          speakSpecs.delete(speakQueue[i].key);
+          dropSpeakJob(speakQueue[i].key, { ok: false, message: 'replaced' });
           speakQueue.splice(i, 1);
         }
       }
@@ -2768,7 +2829,7 @@ export function apply(ctx: any): void {
       debugTrace(`[speak] 丢掉 ${spec.key}：${decision.reason ?? 'unknown'}`);
       return Promise.resolve({ ok: false, message: decision.reason ?? 'dropped' });
     }
-    for (const gone of decision.dropped) speakSpecs.delete(gone.key);
+    for (const gone of decision.dropped) dropSpeakJob(gone.key, { ok: false, message: 'queue-full' });
     speakQueue = decision.queue;
     return new Promise<SpeakOutcome>((resolve) => {
       speakSpecs.set(spec.key, { ...spec, settle: resolve });
@@ -2880,7 +2941,7 @@ export function apply(ctx: any): void {
     const dropped = speakQueue.length + (speakActive === null ? 0 : 1);
     epoch += 1;
     stopLoud(false);
-    for (const job of speakQueue) speakSpecs.delete(job.key);
+    for (const job of speakQueue) dropSpeakJob(job.key, { ok: false, interrupted: true, message: `interrupted:${reason}` });
     speakQueue = [];
     const active = speakActive;
     speakActive = null;

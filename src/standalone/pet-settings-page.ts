@@ -688,11 +688,14 @@ export const petSettingsScript = `
     });
     bub.addEventListener('pointermove', function (ev) {
       if (!drag) return;
-      const maxX = box.clientWidth - 120;
-      const maxY = box.clientHeight - 34;
-      // 【汐儿 · 11-16 m22720】取整：clientX 是小数，偏移量带小数点会让整份设置被拒。
-      hintPos.x = Math.round(Math.max(-100, Math.min(maxX - HINT_BASE.left, drag.ox + (ev.clientX - drag.x))));
-      hintPos.y = Math.round(Math.max(-40, Math.min(maxY - HINT_BASE.top, drag.oy + (ev.clientY - drag.y))));
+      // 【汐儿 · 11-16 体检 B4】边界必须和 schema 完全一致（hint.x / hint.y 都是 ±400）：
+      // 以前上限按预览框宽度算（能拖到 448），拖偏一点保存就被判「桌宠设置无效」。
+      // 取整也在这里做：clientX 是小数，带小数点的偏移量同样会让整份设置被拒。
+      const clampHint = function (value, lo, hi) {
+        return Math.round(Math.max(lo, Math.min(hi, value)));
+      };
+      hintPos.x = clampHint(drag.ox + (ev.clientX - drag.x), -400, 400);
+      hintPos.y = clampHint(drag.oy + (ev.clientY - drag.y), -400, 400);
       showHint();
     });
     const stop = function () { drag = null; };
