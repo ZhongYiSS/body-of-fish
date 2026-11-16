@@ -823,3 +823,32 @@ describe('对外 Cordis 服务 —— 第三方注册余额查询', () => {
     assert.equal(api().list().external.includes('route-test-plugin'), false);
   });
 });
+
+describe('接口收敛：已删除的 9 条死路由（11-16 体检，零调用）', () => {
+  const gone: Array<[string, string]> = [
+    ['/dsh-pet-7340/companion/start', 'POST'],
+    ['/dsh-pet-7340/companion/stop', 'POST'],
+    ['/dsh-pet-7340/companion/status', 'GET'],
+    ['/dsh-pet-7340/lyric/start', 'POST'],
+    ['/dsh-pet-7340/lyric/stop', 'POST'],
+    ['/dsh-pet-7340/lyric/status', 'GET'],
+    ['/dsh-pet-7340/model/test', 'POST'],
+    ['/dsh-pet-7340/lookup?q=泰拉瑞亚', 'GET'],
+    ['/dsh-pet-7340/connection/detect', 'POST'],
+  ];
+
+  for (const [url, method] of gone) {
+    test(method + ' ' + url + ' 已经没有了', async () => {
+      const r = await call(url, method, method === 'POST' ? '{}' : undefined);
+      // 删掉的路由落到最后的兜底分支（400 'expected /dsh-pet-7340/thumb/<petId>/<file>'）——
+      // 只要是「不再是原来那个 200」就说明它真的没了。
+      assert.equal(r.status, 400, url + ' 应该已经没有了，实际 ' + r.status + ' body=' + r.body);
+      assert.match(r.body, /expected \/dsh-pet-7340\/thumb/u);
+    });
+  }
+
+  test('保留的兄弟接口还在：/connection 仍然 200', async () => {
+    const r = await call('/dsh-pet-7340/connection');
+    assert.equal(r.status, 200);
+  });
+});

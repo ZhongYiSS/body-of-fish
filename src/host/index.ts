@@ -4562,21 +4562,6 @@ export function apply(ctx: any): void {
     const url = new URL(rawUrl, 'http://localhost');
     const rest = decodeURIComponent(url.pathname.slice(ROUTE_PREFIX.length + 1));
 
-    // /lookup?q=名字：手动查一次资料（本鱼 · 11-10 m18596）。
-    // 这是给设置页「查一下」按钮和排查用的**直连口**，不走缓存也不吃当天配额。
-    if (rest === 'lookup') {
-      if (method !== 'GET') return { kind: 'json', status: 405, obj: { error: 'method not allowed' } };
-      const q = String(url.searchParams.get('q') ?? '').trim();
-      if (q === '') return { kind: 'json', status: 400, obj: { ok: false, error: 'missing q' } };
-      const found = await searchWeb(q);
-      return {
-        kind: 'json',
-        status: 200,
-        obj: { ok: found.ok, query: found.query, engine: found.engine, ms: found.ms, hits: found.hits, wiki: wikiLine(found) },
-        headers: { 'cache-control': 'no-cache, no-store' },
-      };
-    }
-
     // /windows：列出能选的窗口（设置页「窗口」模式的下拉用，哥哥 11-16 m21257）
     if (rest === 'windows') {
       if (method !== 'GET') return { kind: 'json', status: 405, obj: { error: 'method not allowed' } };
@@ -4712,32 +4697,12 @@ export function apply(ctx: any): void {
         headers: { 'cache-control': 'no-cache, no-store' },
       };
     }
-    if (rest === 'model/test') {
-      if (method !== 'POST') return { kind: 'json', status: 405, obj: { error: 'method not allowed' } };
-      let parsed: Record<string, unknown>;
-      try {
-        parsed = JSON.parse(body ?? '') as Record<string, unknown>;
-      } catch {
-        return { kind: 'json', status: 400, obj: { error: 'invalid JSON body' } };
-      }
-      const capability = String(parsed.capability ?? '');
-      if (capability !== 'chat' && capability !== 'vision' && capability !== 'tts') {
-        return { kind: 'json', status: 400, obj: { error: 'capability 必须是 chat / vision / tts' } };
-      }
-      // 允许先"试"再"存"：带了 model 段就用它测，没带就用磁盘上的当前配置
-      const petId = String(url.searchParams.get('pet') ?? 'main');
-      const found = findPetInstance(readAllConfig(configPaths), petId);
-      const config = parseModelConfig(parsed.model !== undefined ? parsed.model : found?.conf.model);
-      const gateway = createModelGateway({ readConfig: () => config, session: sessionChat , extraHeaders: backendHeaders });
-      return { kind: 'json', status: 200, obj: await gateway.test(capability) };
-    }
 
     // ===================== 双模式连接：DSH 后开也能接上独立桌宠 =====================
     // 哥哥 m00722 第 3 条：桌宠独立跑着，再开 DSH，用「检测连接」把会话接上。
     // 这里只**读文件 + 探一次**，绝不因此起/杀进程（谁拥有壳谁跑 core，见接口设计 §4）。
-    if (rest === 'connection' || rest === 'connection/detect') {
+    if (rest === 'connection') {
       if (rest === 'connection' && method !== 'GET') return { kind: 'json', status: 405, obj: { error: 'method not allowed' } };
-      if (rest === 'connection/detect' && method !== 'POST') return { kind: 'json', status: 405, obj: { error: 'method not allowed' } };
       const file = join(userRoot, 'standalone-runtime.json');
       let info: ReturnType<typeof parseStandaloneRuntime> = null;
       try {
@@ -4759,55 +4724,6 @@ export function apply(ctx: any): void {
         },
         headers: { 'cache-control': 'no-cache, no-store' },
       };
-    }
-
-    // ===================== 陪伴模式：起 / 停 / 看状态 =====================
-    // 只做启停，不做"自动开"：旧版自动开是因为它在 extras 里没有入口，新版有菜单与设置页。
-    if (rest === 'companion/start' || rest === 'companion/stop' || rest === 'companion/status') {
-      if (rest === 'companion/status') {
-        if (method !== 'GET') return { kind: 'json', status: 405, obj: { error: 'method not allowed' } };
-        const status = companion?.status() ?? { running: false, ticks: 0, idle: 0 };
-        return { kind: 'json', status: 200, obj: status, headers: { 'cache-control': 'no-cache, no-store' } };
-      }
-      if (method !== 'POST') return { kind: 'json', status: 405, obj: { error: 'method not allowed' } };
-      if (rest === 'companion/start') {
-        // 前置条件写在 startCompanion 里（聊天模型）；识图/嗓子缺了是静默降级，不在这里拦。
-        const started = startCompanion();
-        // 菜单要跟着变：不经右键（热键/HTTP/对话）开起来的陪伴，刷新后一级状态才不会是「关」
-        if (started.ok) refreshPetMenu();
-        return started.ok
-          ? { kind: 'json', status: 200, obj: { ok: true } }
-          : { kind: 'json', status: 500, obj: { ok: false, error: started.message } };
-      }
-      stopCompanion();
-      refreshPetMenu();
-      return { kind: 'json', status: 200, obj: { ok: true } };
-    }
-
-    // ===================== 歌词气泡：起 / 停 / 看状态 =====================
-    if (rest === 'lyric/start' || rest === 'lyric/stop' || rest === 'lyric/status') {
-      if (rest === 'lyric/status') {
-        if (method !== 'GET') return { kind: 'json', status: 405, obj: { error: 'method not allowed' } };
-        return {
-          kind: 'json',
-          status: 200,
-          obj: { running: lyricAgent !== null },
-          headers: { 'cache-control': 'no-cache, no-store' },
-        };
-      }
-      if (method !== 'POST') return { kind: 'json', status: 405, obj: { error: 'method not allowed' } };
-      if (rest === 'lyric/start') {
-        const started = startLyric();
-        if (started.ok) setLyricEnabled(true);
-        if (started.ok) refreshPetMenu();
-        return started.ok
-          ? { kind: 'json', status: 200, obj: { ok: true } }
-          : { kind: 'json', status: 500, obj: { ok: false, error: started.message } };
-      }
-      stopLyric();
-      setLyricEnabled(false);
-      refreshPetMenu();
-      return { kind: 'json', status: 200, obj: { ok: true } };
     }
 
     // ===================== 对外服务：气泡 / 嘴 / 眼 =====================
