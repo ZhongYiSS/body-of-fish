@@ -41,16 +41,18 @@ test('一眼看小窗：填的是秒，范围写在控件和提示里', () => {
   assert.ok(!whisperScript.includes('companionIntervalMin'), '分钟字段已经下线');
 });
 
-test('「正在偷看」提示：封顶 30 秒，这一拍结束就撤', () => {
+test('「正在偷看」不再往主气泡写：状态只走副气泡【在看】', () => {
   const source = read('src/host/index.ts');
   const code = source
     .split('\n')
     .filter((line) => !line.trim().startsWith('//') && !line.trim().startsWith('*'))
     .join('\n');
-  assert.ok(!code.includes("statusBubble('本鱼正在偷看…', 180_000)"), '不许再挂三分钟');
-  assert.equal(code.split("statusBubble('本鱼正在偷看…', 30_000)").length - 1, 2, '陪伴 + 手动看一眼都要 30 秒');
-  assert.ok(code.includes("dropHint('status')"), '成功之后要主动撤掉');
-  assert.ok(code.includes('} finally {'), '陪伴那一拍用 finally 撤，失败也不留');
+  // 11-17 m24756：主气泡只装她说的话。「本鱼正在偷看…」是状态，已删除，
+  // 改由 watchSheet 里的 pushHint('watch', '【在看】', 'task') 表达。
+  assert.ok(!code.includes("statusBubble('本鱼正在偷看…'"), '主气泡不许再写「正在偷看」');
+  assert.ok(code.includes("pushHint('watch', '【在看】', 'task')"), '状态要落到副气泡');
+  assert.ok(code.includes("dropHint('watch')"), '看完要及时撤');
+  assert.ok(code.includes("dropHint('status')"), '失败提示（识图失败这类）仍要能撤');
 });
 
 test('第二次双击：宿主自己看锁、自己弹框，被挡下就别留在后台', () => {

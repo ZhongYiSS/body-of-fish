@@ -1334,7 +1334,6 @@ export function apply(ctx: any): void {
           // 【本鱼 · 11-02】陪伴也要有「正在看」的状态：识图慢的时候别让哥哥以为卡死了。
           // 【汐儿 · 11-16 m23786】哥哥报「没开也挂着正在偷看」：原来 180 秒、成功之后也没人清。
           // 现在封顶 30 秒，并在这一拍结束时用 finally 撤掉。
-          await statusBubble('本鱼正在偷看…', 30_000);
           try {
           const eyes = servicesProvider('main').eyes.available();
           if (!eyes.ready) {
@@ -1421,13 +1420,6 @@ export function apply(ctx: any): void {
           }
           companionPending = opts?.image ? { text, image: opts.image } : { text };
           clearCompanionPlaceholder();
-          companionPlaceholder = setTimeout(() => {
-            companionPlaceholder = null;
-            if (companionPending === null) return;
-            writeSayBubble('main', 'companion', { text: '让我想想…', duration: 8000 });
-            noteBubble(`placeholder pet=main src=companion chars=${companionPending.text.length}`);
-          }, 400);
-          companionPlaceholder.unref?.();
           // 兜底：play 一直没来（被跳过 / 被顶掉 / 生成中途换拍），1.5 秒后把真话写出来
           companionFlush = setTimeout(() => {
             companionFlush = null;
@@ -2265,7 +2257,6 @@ export function apply(ctx: any): void {
     dropHint('think');
     // 先冒「正在偷看」：截屏 + 识图 + 对话要好几秒，不冒的话哥哥只会觉得「没反应」。
     // 【汐儿 · 11-16】封顶 30 秒；成功说完立刻撤掉（失败那句 18 秒自己会走）。
-    await statusBubble('本鱼正在偷看…', 30_000);
     const fail = async (message: string): Promise<{ ok: false; message: string }> => {
       await statusBubble(`看一眼失败：${message}`, 18_000);
       return { ok: false, message };
@@ -2354,15 +2345,9 @@ export function apply(ctx: any): void {
   let bubbleOwner: { petId: string; source: 'chat' | 'companion' } | null = null;
   /** 陪伴刚说出口、还没真正出声的那句话（等 runSpeakClip 播放开始时写气泡） */
   let companionPending: { text: string; image?: string } | null = null;
-  /** 合成慢时先冒「让我想想…」的定时器 */
-  let companionPlaceholder: ReturnType<typeof setTimeout> | null = null;
   /** 兜底：1.5 秒还没等到 play，就把真话写出来（宁可晚一点，也不能没字） */
   let companionFlush: ReturnType<typeof setTimeout> | null = null;
   const clearCompanionPlaceholder = (): void => {
-    if (companionPlaceholder !== null) {
-      clearTimeout(companionPlaceholder);
-      companionPlaceholder = null;
-    }
     if (companionFlush !== null) {
       clearTimeout(companionFlush);
       companionFlush = null;
@@ -2660,11 +2645,10 @@ export function apply(ctx: any): void {
     petId: string,
     source: 'chat' | 'companion',
     payload: { text: string; image?: string; duration?: number; imageDuration?: number },
-    force = false,
   ): void => {
-    // 【汐儿 · 11-16 晚 m24524】气泡只在「正在录音」时挡：那几秒别人插字最烦。
-    // 「在想」阶段改成放行——她自己的回话本来就在这个阶段写气泡，挡了就是有字无声 / 有声无字。
-    if (!force && earPhaseNow() === 'listen') return;
+    // 【汐儿 · 11-17 m24756】主气泡**只装她说的话**：只在正在录音那几秒让位。
+    // 等待反馈是「状态」，交给副气泡【在想】，不许往主气泡塞占位词。
+    if (earPhaseNow() === 'listen') return;
     if (source === 'companion') {
       void servicesProvider('main')
         .bubble.say({ petId, text: payload.text, duration: payload.duration, source: 'companion' })
@@ -2752,25 +2736,6 @@ export function apply(ctx: any): void {
       };
       return (await attempt()) ?? (await attempt());
     };
-    // 【汐儿 · 11-16】合成通常要 1.5~2.5 秒，这段时间一个字都没有。
-    // 400 毫秒还没出声就先冒一行占位，真出声时被正式气泡盖掉；快回复根本看不到它。
-    let sayPlaceholderTimer: ReturnType<typeof setTimeout> | undefined;
-    let sayPlaceholderDone = false;
-    const clearSayPlaceholder = (): void => {
-      if (sayPlaceholderTimer !== undefined) {
-        clearTimeout(sayPlaceholderTimer);
-        sayPlaceholderTimer = undefined;
-      }
-    };
-    const armSayPlaceholder = (): void => {
-      sayPlaceholderTimer = setTimeout(() => {
-        sayPlaceholderTimer = undefined;
-        if (sayPlaceholderDone || myEpoch !== epoch) return;
-        writeSayBubble(petId, source, { text: '让我想想…', duration: 8000 });
-        noteBubble(`placeholder pet=${petId} src=${source} chars=${text.length}`);
-      }, 400);
-      sayPlaceholderTimer.unref?.();
-    };
     // 【汐儿 · 11-15 23:20】串行合成、首句优先：并发会把嗓子堵死（实测首句等了 21.7 秒）。
     // 链上第一个就是第一句，后面排着队合成；念到哪、合成到哪，不抢。
     let synthChain: Promise<unknown> = Promise.resolve();
@@ -2789,9 +2754,7 @@ export function apply(ctx: any): void {
       }
       const line = sentences[i];
       const isLast = i === sentences.length - 1;
-      if (i === 0) armSayPlaceholder();
       const said = await jobs[i];
-      if (i === 0) clearSayPlaceholder();
       if (!said) {
         // 合成失败是「有气泡没声音」的头号嫌疑，必须留痕；剩下的字一次写出去。
         noteVoiceIssue(`synth-failed pet=${petId} src=${source} i=${i}/${sentences.length} say=${line.slice(0, 24)}`);
@@ -2815,8 +2778,6 @@ export function apply(ctx: any): void {
       const show = (): void => {
         if (shown) return;
         shown = true;
-        sayPlaceholderDone = true;
-        clearSayPlaceholder();
         dropHint('think');
         // 她开口了：在听 / 在想到此为止（不撤的话那行会一直挂着）
         setEarPhase('idle');
@@ -4156,10 +4117,6 @@ export function apply(ctx: any): void {
       touchUser();
       // 从「收到话」到「开口」之间是空窗（模型要几秒）：先挂【在想】，开口那一刻撤（见 runSpeakTextInner）
       setEarPhase('think');
-      // 【汐儿 · 11-16 晚 m24332】按停麦之后头顶要马上有反应，别等 ASR + 生成 + 合成走完：
-      // 先占一行「让我想想…」（8 秒自然过期，真实回复开口时会被顶掉）。force 是绕过耳闸——
-      // 这会儿状态正是 think，不绕过就写不出去。
-      writeSayBubble(petId, 'chat', { text: '让我想想…', duration: 8000 }, true);
       const cfg = readAllConfig(configPaths);
       const found = findPetInstance(cfg, petId);
       // 宠物在"校验那次读"与这里之间被删了——本函数还要先排 withMemoryLock 的串行队列（等前一次生成
@@ -4176,9 +4133,7 @@ export function apply(ctx: any): void {
           // 回一句占位话给调用方：/chat 的调用方（热键「听」的听.py）拿空文本会当成"她没回话"
           // 报错。真正的内容等桥在回合结束时送回气泡/嗓子，这里只负责"我知道你在说了"。
           // 不写 pet 记忆（DSH 会话那边自己记），也不念出来（念就成第二份声音了）。
-          void servicesProvider('main')
-            .bubble.say({ petId, text: '嗯嗯，本鱼听着，这就去问', duration: 2200 })
-            .catch(() => null);
+          pushHint('status', '转给 DSH 了，等她回话', 'event', 2_200);
           dropHint('think');
           // 状态也要一起撤：不撤的话接下来 45 秒里非 urgent 的声音全被挡（她自己也说不出来）
           setEarPhase('idle');
@@ -4187,9 +4142,7 @@ export function apply(ctx: any): void {
         // 11-03：DSH 没开 / 桥插件没响应 → **降级自己答**，别把「DSH 那边没接住」丢给用户当错误。
         // 桥的状态顺手刷新一次，菜单和下一轮就知道它掉线了。
         dshBridge = await fetchDshBridgeState(dshBridgeUrl);
-        void servicesProvider('main')
-          .bubble.say({ petId, text: 'DSH 没开，本鱼先自己答～', duration: 2400 })
-          .catch(() => null);
+        pushHint('status', 'DSH 没开，先自己答', 'event', 2_400);
       }
       // 11-09：上下文改成「最近 30 分钟」时间窗，chatMemoryRounds 那一档不再截历史
       // 人设：实例级 whisperPrompt 优先，没写回落所属条目（与碎碎念同一拼装）

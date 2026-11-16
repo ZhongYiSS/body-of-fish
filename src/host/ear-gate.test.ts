@@ -70,12 +70,22 @@ describe('在听 / 在想：三个状态都要落到提示层', () => {
     // 11-16 晚 m24332：按停麦就报 think（rec-stop）。
     // 【11-16 夜 m24648】出字那次不再补报——重复报会把延迟的【在想】重新计时，看着像闪。
     assert.equal(earCode.split("reportEarPhase('think');").length - 1, 1, '只有按停麦报 think');
-    // 11-16 晚第二轮自查：除了 reply / error，脚本进程自己退出或报错也要撤（4 次）——
+    // 11-16 晚第二轮自查：脚本进程自己退出或报错也要撤（3 次）——
     // 不撤的话心跳会一直替它喊「在听」，宿主 45 秒兜底永远等不到，就成永久闭嘴。
+    // 【11-17 m24756】reply 不再撤：reply 只是文字到了，声音还要合成两秒，早撤就是「说话前闪一下」。
+    // 收尾交给宿主——第一句音频真的开播时它自己 setEarPhase('idle')。
     assert.equal(
       earCode.split("reportEarPhase('idle');").length - 1,
-      4,
-      'reply、error、进程退出、进程报错各撤一次',
+      3,
+      'error、进程退出、进程报错各撤一次（reply 不撤）',
+    );
+    const replyAt = earCode.indexOf("event.event === 'reply'");
+    assert.ok(replyAt > 0, '没找到 reply 分支');
+    const errAt = earCode.indexOf("event.event === 'error'", replyAt);
+    assert.ok(errAt > replyAt, '没找到 error 分支');
+    assert.ok(
+      !earCode.slice(replyAt, errAt).includes("reportEarPhase('idle')"),
+      'reply 里不许再撤状态（那会让【在想】在出声前提前消失）',
     );
   });
 
@@ -156,7 +166,7 @@ describe('在听 / 在想：别的声音和气泡让路', () => {
     // 11-16 晚第三轮（m24524）：气泡闸只挡「正在录」——「在想」阶段她自己的回话要走这条路，
     // 挡了就是有字无声。earQuiet 已删除，第三方气泡改走 /broadcast 的 listen 判断。
     // 11-16 晚 m24332：她自己的「让我想想…」占位要能写出去（那时正是 think），所以留了 force 例外。
-    assert.match(hostCode, /if \(!force && earPhaseNow\(\) === 'listen'\) return;/);
+    assert.match(hostCode, /if \(earPhaseNow\(\) === 'listen'\) return;/, 'writeSayBubble 只在录音时让位');
     assert.match(hostCode, /\{ ok: false, reason: 'ear-busy' \}/);
     assert.ok(!hostCode.includes('earQuiet'), 'earQuiet 应该已经删干净');
   });

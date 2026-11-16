@@ -84,7 +84,7 @@ describe('嗓子仲裁中心：任务离队都要兑现 Promise', () => {
  * 三个硬规矩：
  * ① 陪伴的气泡不能在合成之前就冒 —— 先记账，等音频真的开始由 runSpeakClip 写；
  * ② 陪伴合成失败 = 只会冒字，这时必须把记下的那句话写出来（改时序不能把字弄丢）；
- * ③ 合成超过 400 毫秒还没出声，先冒一行「让我想想…」，正式气泡一出现就把它作废。
+ * ③ 合成慢的那几秒**不要**往主气泡塞「让我想想…」——等待是状态，交给副气泡【在想】（哥哥 m24756）。
  */
 describe('声音与气泡：同一个起点', () => {
   test('陪伴的气泡先记账，播放开始才写', () => {
@@ -92,8 +92,8 @@ describe('声音与气泡：同一个起点', () => {
       hostCode.includes("companionPending = opts?.image ? { text, image: opts.image } : { text };"),
       '陪伴不再记账 —— 气泡又会在合成前冒出来',
     );
-    assert.ok(hostCode.includes("text: '让我想想…'"), '少了合成慢时的占位气泡');
-    assert.ok(hostCode.includes('}, 400);'), '占位气泡的 400 毫秒守卫不见了');
+    assert.ok(!hostCode.includes('让我想想'), '主气泡里不许再有「让我想想…」占位（等待只走副气泡【在想】）');
+    assert.ok(!hostCode.includes('armSayPlaceholder'), '占位定时器整套应该已经删掉');
   });
 
   test('clip 在播放开始时写气泡（陪伴不再只有声音没有字）', () => {
@@ -111,8 +111,10 @@ describe('声音与气泡：同一个起点', () => {
     assert.ok(hostCode.includes('bubbleImage: pending.image'), '表情包没跟着气泡走');
   });
 
-  test('正式气泡一出现就作废占位', () => {
-    assert.ok(hostCode.includes('sayPlaceholderDone = true;'), '正式气泡出现时没有作废占位');
-    assert.ok(hostCode.includes('armSayPlaceholder();'), '没有装占位定时器');
+  test('等待反馈只走副气泡，不占主气泡', () => {
+    // 哥哥 m24756：主气泡装她说的话，副气泡装她的状态；同一个信息不许有两个出口。
+    assert.ok(!hostCode.includes('让我想想'), '主气泡里不该有占位词');
+    assert.match(hostCode, /pushHint\('ear', '【在想】', 'task'\)/, '等待由【在想】表达');
+    assert.match(hostCode, /setEarPhase\('think'\)/, '进入等待时要切状态');
   });
 });

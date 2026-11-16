@@ -166,8 +166,10 @@ function handleLine(line) {
     return;
   }
   if (event.event === 'reply') {
+    // 【汐儿 · 11-17 m24756】这里**不再**报 idle：reply 只是「文字回复到了」，声音还要合成两秒才出来。
+    // 早报 idle 就会出现「【在想】先灭、两三秒后才【在说】」——哥哥说的「说话前闪一下」。
+    // 真正的收尾交给宿主：第一句音频真的开播时它会 setEarPhase('idle')。
     log('回：' + event.text);
-    reportEarPhase('idle');
     return;
   }
   if (event.event === 'error') {
