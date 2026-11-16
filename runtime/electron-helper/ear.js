@@ -86,6 +86,26 @@ function appendEvent(event, extra) {
   }
 }
 
+/**
+ * 【汐儿 · 11-16 m24046】把「在听 / 在想」告诉宿主：录音一开始就挂【在听】，
+ * 出字之后换【在想】，回答或出错就撤。宿主据此让别的声音和气泡让路。
+ * 令牌只从环境变量来（与 triggerMenu / peek 同一套），不落盘。
+ */
+async function postEarPhase(phase) {
+  try {
+    const res = await fetch(petBase() + '/ear', {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        ...(process.env.DSH_PET_API_TOKEN ? { 'x-dsh-pet-token': process.env.DSH_PET_API_TOKEN } : {}),
+      },
+      body: JSON.stringify({ phase }),
+    });
+    appendEvent('ear-' + phase, String(res.status));
+  } catch (e) {
+    appendEvent('ear-phase-error', e && e.message ? e.message : String(e));
+  }
+}
 function handleLine(line) {
   const text = String(line || '').trim();
   if (!text) return;
@@ -104,18 +124,22 @@ function handleLine(line) {
   }
   if (event.event === 'rec-start') {
     log('开始录 ' + (event.file || ''));
+    void postEarPhase('listen');
     return;
   }
   if (event.event === 'text') {
     log('听到：' + event.text);
+    void postEarPhase('think');
     return;
   }
   if (event.event === 'reply') {
     log('回：' + event.text);
+    void postEarPhase('idle');
     return;
   }
   if (event.event === 'error') {
     log('出错：' + (event.message || ''));
+    void postEarPhase('idle');
   }
 }
 

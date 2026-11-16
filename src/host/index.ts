@@ -2590,11 +2590,37 @@ export function apply(ctx: any): void {
    * - 嗓子没配好：整段当一个普通气泡写出去（不能因为没嗓子就不让人看见字）。
    */
   /** 冒一句气泡：对话走 renderer 的 say 叶子；陪伴/看一眼走 core 的 bubble（来源可区分） */
+  /**
+   * 【汐儿 · 11-16 m24046】「在听 / 在想」——哥哥按说话录音、等回答的那段时间。
+   * 录音时挂【在听】、出字后换【在想】；这段时间里别的声音和气泡一律让路，
+   * 免得他说着话、旁边还在自顾自聊天（哥哥原话：在听的时候其他语音和气泡会跳出来）。
+   * 手动动作（urgent：Alt+T 打断、说一句、桥 say-loud）不受限——那是他自己要的。
+   */
+  type EarPhase = 'idle' | 'listen' | 'think';
+  let earPhase: EarPhase = 'idle';
+  let earPhaseAt = 0;
+  /** 兜底：脚本报上来的状态万一来不及撤（听.py 崩了 / 断线），两分钟自动失效 */
+  const EAR_PHASE_TTL_MS = 120_000;
+  const earPhaseNow = (): EarPhase =>
+    earPhase !== 'idle' && Date.now() - earPhaseAt > EAR_PHASE_TTL_MS ? 'idle' : earPhase;
+  const setEarPhase = (phase: EarPhase): void => {
+    earPhase = phase;
+    earPhaseAt = Date.now();
+    if (phase === 'listen') pushHint('ear', '【在听】', 'task');
+    else if (phase === 'think') pushHint('ear', '【在想】', 'task');
+    else dropHint('ear');
+  };
+  /** 在听或在想：别的声音让路（manual/urgent 例外） */
+  const earMuted = (): boolean => earPhaseNow() !== 'idle';
+  /** 正在录音：连气泡也不许跳出来抢「我在听…」那一条 */
+  const earQuiet = (): boolean => earPhaseNow() === 'listen';
   const writeSayBubble = (
     petId: string,
     source: 'chat' | 'companion',
     payload: { text: string; image?: string; duration?: number; imageDuration?: number },
   ): void => {
+    // 哥哥正在说话：气泡不许跳出来抢（他自己手动的 urgent 走 centerPlayClip，不经过这里）
+    if (earQuiet()) return;
     if (source === 'companion') {
       void servicesProvider('main')
         .bubble.say({ petId, text: payload.text, duration: payload.duration, source: 'companion' })
@@ -2747,6 +2773,9 @@ export function apply(ctx: any): void {
         shown = true;
         sayPlaceholderDone = true;
         clearSayPlaceholder();
+        dropHint('think');
+        // 她开口了：在听 / 在想到此为止（不撤的话那行会一直挂着）
+        setEarPhase('idle');
         if (myEpoch !== epoch) {
           noteBubble(`skip superseded epoch=${myEpoch} now=${epoch} i=${i}/${sentences.length} pet=${petId} src=${source} chars=${line.length}`);
           return;
@@ -2970,6 +2999,8 @@ export function apply(ctx: any): void {
     replacePrefix?: string;
   }): Promise<SpeakOutcome> => {
     if (req.text.trim() === '') return Promise.resolve({ ok: true });
+    // 在听 / 在想的时候，陪伴、一眼看、碎碎念都别出声（回话本身不受影响：那时状态已经撤了）
+    if (earMuted() && (req.priority ?? 'normal') !== 'urgent') return Promise.resolve({ ok: false, message: 'ear-busy' });
     const priority = req.priority ?? 'normal';
     // 上一句没轮到的，并到这一句前面一起说（urgent 是手动动作，不背旧账）
     const carried = priority === 'urgent' ? '' : takeSpeakCarry();
@@ -3024,6 +3055,8 @@ export function apply(ctx: any): void {
     bubbleText?: string;
     bubbleImage?: string;
   }): Promise<SpeakOutcome> => {
+    // 同一道闸：在听 / 在想的时候，别人（陪伴的自动出声）播的音频让路；urgent 照旧
+    if (earMuted() && (req.priority ?? 'urgent') !== 'urgent') return Promise.resolve({ ok: false, message: 'ear-busy' });
     const spec: SpeakSpec = {
       key: `clip:${++speakJobSeq}`,
       priority: req.priority ?? 'urgent',
@@ -4059,6 +4092,8 @@ export function apply(ctx: any): void {
   > =>
     withMemoryLock(async () => {
       touchUser();
+      // 从「收到话」到「开口」之间是空窗（模型要几秒）：先挂【在想】，开口那一刻撤（见 runSpeakTextInner）
+      pushHint('think', '【在想】', 'task', 180_000);
       const cfg = readAllConfig(configPaths);
       const found = findPetInstance(cfg, petId);
       // 宠物在"校验那次读"与这里之间被删了——本函数还要先排 withMemoryLock 的串行队列（等前一次生成
@@ -4078,6 +4113,7 @@ export function apply(ctx: any): void {
           void servicesProvider('main')
             .bubble.say({ petId, text: '嗯嗯，本鱼听着，这就去问', duration: 2200 })
             .catch(() => null);
+          dropHint('think');
           return { ok: true as const, text: '（已转给本鱼，等她回话）' };
         }
         // 11-03：DSH 没开 / 桥插件没响应 → **降级自己答**，别把「DSH 那边没接住」丢给用户当错误。
@@ -4110,7 +4146,10 @@ export function apply(ctx: any): void {
           ? await generateChatViaGateway(gatewayFor(found.conf), sys, list, text, pool)
           : await generateChat(ctx, sys, list, text, pool, configuredModel(found.conf, 'chatModel'));
       let generated = await ask(system);
-      if (!generated.ok) return generated;
+      if (!generated.ok) {
+        dropHint('think');
+        return generated;
+      }
       // 她点名要查：搜一次（2 秒封顶），把资料塞回去请她用自己的话答。最多查一轮，防死循环。
       if (searchOn) {
         const call = parseToolCall(generated.text);
@@ -5534,6 +5573,22 @@ export function apply(ctx: any): void {
     //     scheme 由宿主卡在 http/https。**宿主不做代理**：跨域由浏览器强制，插件绕不过去。
     //   duration 可选，气泡显示时长（ms）；缺省 10s，`0` = 字面意思「不显示」，负数/非有限数拒绝；
     //   anim 可选，是否联动 events.whisper 动画；只有严格 false 才关闭（宽松口径）。
+    // 听的口型：/dsh-pet-7340/ear（POST {phase:'listen'|'think'|'idle'}）。
+    // 听.py 只管录音和出字，壳（ear.js）把「在录 / 出字了 / 有回复了」翻译成这三种状态。
+    if (rest === 'ear') {
+      if (method !== 'POST') return { kind: 'json', status: 405, obj: { error: 'method not allowed' } };
+      let parsed: unknown;
+      try {
+        parsed = JSON.parse(body ?? 'null');
+      } catch {
+        return { kind: 'json', status: 400, obj: { error: 'invalid JSON body' } };
+      }
+      const o = parsed && typeof parsed === 'object' ? (parsed as Record<string, unknown>) : {};
+      const phase = o.phase === 'listen' ? 'listen' : o.phase === 'think' ? 'think' : 'idle';
+      setEarPhase(phase);
+      return { kind: 'json', status: 200, obj: { ok: true, phase: earPhaseNow() } };
+    }
+
     if (rest === 'broadcast') {
       if (method !== 'POST') return { kind: 'json', status: 405, obj: { error: 'method not allowed' } };
       let parsed: unknown;
@@ -5543,6 +5598,7 @@ export function apply(ctx: any): void {
         return { kind: 'json', status: 400, obj: { error: 'invalid JSON body' } };
       }
       const o = parsed && typeof parsed === 'object' ? (parsed as Record<string, unknown>) : {};
+      if (earQuiet()) return { kind: 'json', status: 200, obj: { ok: false, reason: 'ear-busy' } };
       // 判定 + 门禁 + 写叶子全在 core（唯一实现）；这里只负责把请求翻成 SayInput、回状态码。
       return {
         kind: 'json',

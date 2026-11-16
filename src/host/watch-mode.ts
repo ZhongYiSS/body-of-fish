@@ -680,6 +680,11 @@ export function createWatchMode(options: WatchOptions): WatchHandle {
   function spawnCapture(): boolean {
     const bin = options.ffmpegPath || 'ffmpeg';
     const mine = generation;
+    // 【汐儿 · 11-16 m24046】自动截图横纹 / 缺块的真凶：抓屏进程重启时没清残留的半帧。
+    // 旧流死在半帧上，新流的字节从这个偏移接着拼，**之后每一帧都错位**——
+    // 落到图上就是横纹、斜切、缺一块。重启前先把半帧桶倒干净。
+    pending = [];
+    pendingLen = 0;
     try {
       child = spawn(bin, captureArgs(), { stdio: ['ignore', 'pipe', 'pipe'] });
     } catch (error) {
