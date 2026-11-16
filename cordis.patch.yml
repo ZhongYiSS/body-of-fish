@@ -15,8 +15,8 @@
 #     用正则抓该行的值并要求其后直接换行，行尾注释会让它抓不到 entry ID，
 #     整份提交被判 SUBMISSION_ENTRY_MISSING（与 id 叫什么名字无关）
 #   - name: 'dsh-pet' 会解析包入口 lib/index.js（宿主半侧）
-#   - 因为 package.json 声明了 dsh.client，DSH 的模块系统同时会把
-#     这个包扫描为"浏览器插件"，提供 /plugins/dsh-pet/client.js 给页面
+#   - 0.5.0 起本包不再声明 dsh.client，也不再提供 /plugins/dsh-pet/client.js：
+#     它是 Windows 桌面小窗（独立 exe），与 DSH 网页面板无关
 #
 # ============================================================================
 

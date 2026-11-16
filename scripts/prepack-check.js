@@ -21,7 +21,6 @@ const REQUIRED = [
   'package.json',
   'cordis.patch.yml',
   'lib/index.js',
-  'lib/client.js',
   'lib/standalone.js',
   'assets/config.jsonc',
   'assets/logo.png',

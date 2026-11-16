@@ -1,10 +1,10 @@
 import { defineConfig } from 'tsdown';
 
 /**
- * dsh-pet2 构建配置 —— 三个入口，对应 package.json 的三处声明：
- *   lib/index.js       ← main / cordis.patch.yml 的 name
- *   lib/client.js      ← exports['./client']（浏览器半侧）
- *   lib/standalone.js  ← bin.dsh-pet-standalone（独立模式，保留下来的那个）
+ * dsh-pet2 构建配置 —— 两个入口，对应 package.json 的两处声明：
+ *   lib/index.js       ← main / cordis.patch.yml 的 name（宿主半侧）
+ *   lib/standalone.js  ← bin.dsh-pet-standalone（独立模式）
+ * 0.5.0 起不再有 lib/client.js：DSH 网页版 UI 已整批删掉，本包只有桌面小窗。
  *
  * @deepseek-ai/* 是宿主的 peerDependencies，运行期由 DSH 提供，一律不打包。
  */
@@ -17,15 +17,6 @@ export default defineConfig([
     format: ['esm'],
     platform: 'node',
     target: 'node22',
-    dts: false,
-    external,
-  },
-  {
-    entry: { client: 'src/client/index.ts' },
-    outDir: 'lib',
-    format: ['esm'],
-    platform: 'browser',
-    target: 'es2022',
     dts: false,
     external,
   },

@@ -20,7 +20,6 @@ const readSource = (rel: string): string => readFileSync(fileURLToPath(new URL(r
 
 const core = readSource('./pet-core.ts');
 const host = readSource('../index.ts');
-const sharedState = readSource('../../shared/state.ts');
 
 describe('PetCore 边界', () => {
   test('不许 import src/shared（DSH 单文件加载会拆 chunk 导致插件加载失败）', () => {
@@ -49,14 +48,11 @@ describe('PetCore 边界', () => {
     assert.deepEqual(missing, [], `这些路由在 src/host/index.ts 里找不到了：${missing.join(', ')}`);
   });
 
-  test('宿主侧与 shared 侧的 say 形状字面量一致', () => {
-    // shared 的读端（浏览器/壳）："clear 优先、然后必须有非空 text"
-    assert.ok(/d\.clear === true\) return \{ kind: 'clear' \}/.test(sharedState), 'shared 读端必须还认 clear 指令');
-    assert.ok(/d\.text/.test(sharedState), 'shared 读端必须还读 text');
-    // 宿主写下端：两种形态、配图两字段并列
+  // 0.5.0 起 shared 读端（网页版 UI）已删，守卫只剩宿主写端这一半：字段名不能再漂，
+  // 壳 `runtime/electron-helper/shared-core.js` 的 readSay 仍按这些名字读。
+  test('宿主侧 say 形状：配图两字段并列声明', () => {
     for (const field of ['image', 'url', 'duration', 'anim']) {
-      assert.ok(new RegExp(`\\b${field}\\?:`).test(core), `宿主 SayCue 必须声明 ${field}（与 shared 读端同名）`);
-      assert.ok(new RegExp(`d\\.${field}`).test(sharedState), `shared 读端必须读 d.${field}（与宿主写端同名）`);
+      assert.ok(new RegExp(`\\b${field}\\?:`).test(core), `宿主 SayCue 必须声明 ${field}`);
     }
   });
 

@@ -10,9 +10,7 @@
     "desktop-pet",
     "pet",
     "floating-widget",
-    "web-ui",
-    "cordis",
-    "react"
+    "cordis"
   ],
   "homepage": "https://github.com/ZhongYiSS/body-of-fish#readme",
   "repository": {
@@ -27,9 +25,7 @@
     "type: module —— 本包是 ESM",
     "main: lib/index.js —— 宿主半侧入口（Cordis 插件：name/inject/apply）",
     "icon —— 插件图标（DSH 插件管理页显示）：相对 package.json 的图片路径，只认 svg/png/jpg/jpeg/webp，≤256 KiB，realpath 后必须留在包目录内；读取方是 dsh-app-boot 的 iconOf，会内联成 base64 data URL 塞进 meta.icon",
-    "exports['./client'] —— 浏览器半侧入口，DSH 模块系统按它提供 /plugins/dsh-pet/client.js",
     "dsh.bundle.patch —— 声明本包是 bundle，patch 文件是 cordis.patch.yml（安装后自动进层栈）",
-    "dsh.client —— 声明浏览器半侧的注入依赖和平台（web）",
     "dsh.compatibility.dshReleases —— 对官方 DSH 完整版本逐项声明 compatible/incompatible/unknown；只写宽泛范围不算证据，商城最新三版至少需要一个 compatible",
     "files —— npm publish 只发这些目录/文件（assets/webm 播放资源（VP9-alpha，浏览器 Chrome/Edge/Firefox 与桌面模式共用）；Safari/HEVC 兼容由仓库流水线支持、fork 定制，不随包发布；assets/preview 的 GIF 仅 README 展示、不入包）",
     "scripts.encode:webm —— 转码管线（step03 母版 → assets/webm 640×360 VP9-alpha）",
@@ -49,10 +45,6 @@
     ".": {
       "types": "./lib/types/index.d.ts",
       "default": "./lib/index.js"
-    },
-    "./client": {
-      "types": "./lib/types/client/index.d.ts",
-      "default": "./lib/client.js"
     },
     "./src/*": "./src/*",
     "./cordis.patch.yml": "./cordis.patch.yml",
@@ -80,8 +72,7 @@
     "standalone": "node lib/standalone.js",
     "dev:mock": "node scripts/dev/mock-server.mjs",
     "build": "node scripts/prepare.js",
-    "prepack": "npm run build && npm run typecheck && npm run lint && npm run format:check && node scripts/prepack-check.js && npm run check:openapi",
-    "check:openapi": "node scripts/check-openapi.mjs",
+    "prepack": "npm run build && npm run typecheck && npm run lint && npm run format:check && node scripts/prepack-check.js",
     "test": "node scripts/test.mjs",
     "typecheck": "tsc --noEmit && tsc -p tsconfig.test.json",
     "types": "node scripts/gen-types.mjs",
@@ -114,33 +105,19 @@
         "0.2.1-rc.2": "compatible",
         "0.2.1-rc.5": "compatible"
       }
-    },
-    "client": {
-      "inject": [
-        "@deepseek-ai/dsh-client-connection"
-      ],
-      "platform": "web"
     }
   },
   "peerDependencies": {
     "@deepseek-ai/cordis": "^4.0.4",
     "@deepseek-ai/dsh-agent-default-model": "^0.2.0-rc.1",
-    "@deepseek-ai/dsh-client-connection": "^0.2.0-rc.1",
-    "@deepseek-ai/dsh-client-ui-primitives": "^0.2.0-rc.1",
-    "@deepseek-ai/dsh-client-ui-slots": "^0.2.0-rc.1",
     "@deepseek-ai/dsh-commands": "^0.2.0-rc.1",
     "@deepseek-ai/dsh-credentials": "^0.2.0-rc.1",
     "@deepseek-ai/dsh-home-paths": "^0.2.0-rc.1",
     "@deepseek-ai/dsh-host-webserver": "^0.2.0-rc.1",
-    "@deepseek-ai/dsh-llm": "^0.2.0-rc.1",
-    "react": "^18.2.0",
-    "react-dom": "^18.2.0"
+    "@deepseek-ai/dsh-llm": "^0.2.0-rc.1"
   },
   "devDependencies": {
     "@deepseek-ai/dsh-agent-default-model": "0.2.1-rc.5",
-    "@deepseek-ai/dsh-client-connection": "0.2.1-rc.5",
-    "@deepseek-ai/dsh-client-ui-primitives": "0.2.1-rc.5",
-    "@deepseek-ai/dsh-client-ui-slots": "0.2.1-rc.5",
     "@deepseek-ai/dsh-commands": "0.2.1-rc.5",
     "@deepseek-ai/dsh-credentials": "0.2.1-rc.5",
     "@deepseek-ai/dsh-home-paths": "0.2.1-rc.5",

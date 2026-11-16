@@ -16,7 +16,7 @@ import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
-const REQUIRED = ['lib/index.js', 'lib/client.js', 'lib/standalone.js'];
+const REQUIRED = ['lib/index.js', 'lib/standalone.js'];
 
 function tsdownBin() {
   const pkgPath = join(ROOT, 'node_modules/tsdown/package.json');

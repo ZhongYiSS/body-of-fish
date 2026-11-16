@@ -28,8 +28,6 @@ const readSource = (rel: string): string => readFileSync(fileURLToPath(new URL(r
 
 const host = readSource('./index.ts');
 const sprite = readSource('../../runtime/electron-helper/sprite.js');
-const clientPet = readSource('../client/pet.ts');
-const menu = readSource('../shared/menu.ts');
 
 describe('桌面端「重载配置」—— 菜单 → 宿主重启 Helper', () => {
   test('宿主：POST /reload 复用 syncDesktop()，且只重启、不写配置文件', () => {
@@ -56,16 +54,8 @@ describe('桌面端「重载配置」—— 菜单 → 宿主重启 Helper', () 
     );
   });
 
-  test('浏览器端不注入该项：网页刷新即可，重载是桌面专属', () => {
-    assert.ok(!/action: 'reload'/.test(clientPet), '浏览器端不得有 reload 菜单项（它会重启整个桌面 Helper）');
-  });
-
   test('syncDesktop 是唯一的重启入口：两个 /config 写接口、/reload 与 /pet-display 都走它', () => {
     const calls = host.match(/void syncDesktop\(\)/g) ?? [];
     assert.equal(calls.length, 4, 'PUT /config、POST /config、POST /reload、POST /pet-display 都应走 syncDesktop()');
-  });
-
-  test('shared 菜单契约放行 reload（桌面壳注入该动作，类型必须包含它）', () => {
-    assert.ok(/'reload'/.test(menu), "shared/menu.ts 的 MenuLeaf.action 必须包含 'reload'");
   });
 });

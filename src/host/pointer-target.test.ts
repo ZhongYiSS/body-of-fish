@@ -266,20 +266,12 @@ describe('源码守卫 —— helper 的两个兜底必须在位', () => {
   });
 });
 
-describe('守卫：主进程镜像的命中盒常量不得与 src/shared/constants.ts 漂移', () => {
-  test('HIT_BOX / CANVAS_H 与 shared 常量一致，画布宽沿用同一约定（字面量 640）', () => {
-    const shared = readSource('../shared/constants.ts');
-    const num = (name: string): number => {
-      const m = new RegExp(String.raw`export const ${name} = (\d+)`).exec(shared);
-      assert.ok(m, 'shared 里找不到 ' + name);
-      return Number(m[1]);
-    };
-    assert.equal(CANVAS_H, num('CANVAS_H'));
-    assert.equal(FEET_Y, num('FEET_Y'));
-    const hit = /export const HIT_BOX = \{ x0: (\d+), y0: (\d+), x1: (\d+), y1: (\d+) \}/.exec(shared);
-    assert.ok(hit, 'shared 里的 HIT_BOX 形状变了，请同步 pointer-target.js');
-    assert.deepEqual(HIT_BOX, { x0: Number(hit[1]), y0: Number(hit[2]), x1: Number(hit[3]), y1: Number(hit[4]) });
-    // 画布宽 shared 没有导出（各处都用字面量 640）：这里断言渲染端也是同一约定，避免我们把宽写成别的值
+// 0.5.0 起 src/shared 已整批删除（网页版 UI 下线），这份漂移守卫改成只守「宿主镜像 vs 渲染端」：
+// 命中盒必须是正矩形、画布宽两边同一约定（640），否则点击判定会整体偏。
+describe('守卫：主进程镜像的命中盒常量与渲染端同一约定', () => {
+  test('HIT_BOX 是正矩形，画布宽沿用 640', () => {
+    assert.ok(HIT_BOX.x0 < HIT_BOX.x1 && HIT_BOX.y0 < HIT_BOX.y1, 'HIT_BOX 必须是正矩形');
+    assert.ok(FEET_Y > 0 && FEET_Y < CANVAS_H, 'FEET_Y 必须落在画布内');
     assert.equal(STAGE_W, 640);
     assert.ok(
       /S\.HIT_BOX\.x0 \/ 640/.test(readSource(helper + 'sprite.js')),

@@ -857,7 +857,7 @@ const displayMenuBranch = () => ({
 	]
 });
 const MORE_MENU_LABEL = "更多";
-/** 陪伴模式的第三方菜单归属：不塞进「更多」，单独一层放顶层（与浏览器端 lib/client.js 同语义） */
+/** 陪伴模式的第三方菜单归属：不塞进「更多」，单独一层放顶层（旧浏览器端也是这个语义） */
 const COMPANION_OWNER = "本鱼陪伴";
 /**
  * 状态行前缀（宿主 `src/host/pet-menu.ts` 的 STATUS_PREFIX 必须与这里逐字一致）。
