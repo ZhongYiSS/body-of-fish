@@ -11,7 +11,7 @@
  * 守护协议通道、并在异常退出时自动重启。
  */
 
-import { spawn } from 'node:child_process';
+import { execFile, spawn } from 'node:child_process';
 import { existsSync, mkdirSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { fileURLToPath } from 'node:url';
@@ -462,6 +462,19 @@ export class HelperProcess {
     this.stop(reason);
     const child = this.child;
     if (!child) return;
+    // 【汐儿 · 11-16 晚 m24524】Windows 上 child.kill() 只作用于 Electron 主进程：
+    // 渲染器 / GPU / 网络三个子进程还活着（实测 22:26 那套 3180/10420 一直没死），
+    // 于是「停旧起新」之后桌面上有两个 helper 抢同一个声音设备、抢同一份热键。
+    // 这里改用 taskkill /T /F 杀整棵树；拿不到 pid 就退回原来的 kill。
+    const pid = child.pid;
+    if (process.platform === 'win32' && typeof pid === 'number' && pid > 0) {
+      try {
+        execFile('taskkill', ['/T', '/F', '/PID', String(pid)], { windowsHide: true }, () => {});
+        this.logger.debug?.(`dsh-pet desktop helper taskkill /T /F pid=${String(pid)}（${reason}）`);
+      } catch {
+        /* 已经退出了 */
+      }
+    }
     await waitForChildExit(child, timeoutMs, () => {
       this.logger.warn?.(`dsh-pet desktop helper 未在 ${timeoutMs}ms 内退出，升级 SIGKILL（${reason}）`);
       try {

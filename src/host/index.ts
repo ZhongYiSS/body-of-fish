@@ -2642,10 +2642,9 @@ export function apply(ctx: any): void {
     payload: { text: string; image?: string; duration?: number; imageDuration?: number },
     force = false,
   ): void => {
-    // 【汐儿 · 11-16 晚】闸口要和声音一致：声音是「在听 + 在想」都让路（earMuted），
-    // 气泡以前只挡「在听」（earQuiet）——于是她想事的时候，别处的字还会跳出来。
-    // 她自己那句回话不受影响：写气泡之前已经 setEarPhase('idle') 了。
-    if (!force && earMuted()) return;
+    // 【汐儿 · 11-16 晚 m24524】气泡只在「正在录音」时挡：那几秒别人插字最烦。
+    // 「在想」阶段改成放行——她自己的回话本来就在这个阶段写气泡，挡了就是有字无声 / 有声无字。
+    if (!force && earPhaseNow() === 'listen') return;
     if (source === 'companion') {
       void servicesProvider('main')
         .bubble.say({ petId, text: payload.text, duration: payload.duration, source: 'companion' })
@@ -4882,12 +4881,11 @@ export function apply(ctx: any): void {
       const found = findPetInstance(readAllConfig(configPaths), petId);
       if (!found) return { kind: 'json', status: 404, obj: { error: `unknown pet: ${petId}` } };
       touchUser();
-      // 【汐儿 · 11-16 晚 m24151】桥推来的朗读是「外面的声音」，在听 / 在想时让路——
-      // 不然哥哥正说着话，桥那边自顾自念起来。回 skipped 让调用方知道是被让路，不是出错。
-      if (earMuted()) {
-        logSayLoud('在听/在想，这条让路');
-        return { kind: 'json', status: 200, obj: { ok: true, skipped: true, reason: 'ear-busy' } };
-      }
+      // 【汐儿 · 11-16 晚 m24524】这里**不再**按「在听/在想」让路。
+      // 让路本意是挡「外面的声音」，可 听.py 的回话走的正是 /say-loud：
+      // 它 emit reply 与这条请求几乎同刻，ear.js 的 idle 消息常晚一拍 →
+      // 她的回话被自己刚设的状态挡掉，表现就是「说了但没声音」。
+      // 真正插嘴的第三方走 /broadcast，那条继续在「正在录音」时让路。
       logSayLoud(`收到 ${text.length} 字 → 念 ${clipped.length} 字：${clipped.slice(0, 40)}`);
       // servicesProvider 里已经做了 fillCloudBackend（云端留空 → 沿用 AI 设置那一份）
       const services = servicesProvider(petId);
@@ -5558,7 +5556,9 @@ export function apply(ctx: any): void {
         return { kind: 'json', status: 400, obj: { error: 'invalid JSON body' } };
       }
       const o = parsed && typeof parsed === 'object' ? (parsed as Record<string, unknown>) : {};
-      if (earMuted()) return { kind: 'json', status: 200, obj: { ok: false, reason: 'ear-busy' } };
+      if (earPhaseNow() === 'listen') {
+        return { kind: 'json', status: 200, obj: { ok: false, reason: 'ear-busy' } };
+      }
       // 判定 + 门禁 + 写叶子全在 core（唯一实现）；这里只负责把请求翻成 SayInput、回状态码。
       return {
         kind: 'json',

@@ -118,8 +118,8 @@ describe('在听 / 在想：别的声音和气泡让路', () => {
       'centerSay 与 centerPlayClip 各一道闸（这两条是 Promise 返回值，用 message）',
     );
     assert.ok(
-      hostCode.split("reason: 'ear-busy'").length - 1 >= 2,
-      '/say-loud 与 /broadcast 这两条 HTTP 路由用 reason 回 ear-busy',
+      hostCode.split("reason: 'ear-busy'").length - 1 >= 1,
+      '/broadcast（外部推来的气泡）在「正在录」时用 reason 回 ear-busy',
     );
     assert.match(hostCode, /if \(earMuted\(\) && \(req\.priority \?\? 'normal'\) !== 'urgent'\)/);
     assert.match(hostCode, /if \(earMuted\(\) && \(req\.priority \?\? 'urgent'\) !== 'urgent'\)/);
@@ -152,11 +152,25 @@ describe('在听 / 在想：别的声音和气泡让路', () => {
   });
 
   test('在听/在想时不写说话气泡、不收第三方气泡', () => {
-    // 11-16 晚第二轮自查：气泡闸以前只挡「在听」（earQuiet），她思考时别处的字还会跳出来；
-    // 现在气泡和声音用同一个口径（earMuted），earQuiet 直接删掉。
+    // 11-16 晚第三轮（m24524）：气泡闸只挡「正在录」——「在想」阶段她自己的回话要走这条路，
+    // 挡了就是有字无声。earQuiet 已删除，第三方气泡改走 /broadcast 的 listen 判断。
     // 11-16 晚 m24332：她自己的「让我想想…」占位要能写出去（那时正是 think），所以留了 force 例外。
-    assert.match(hostCode, /if \(!force && earMuted\(\)\) return;/);
+    assert.match(hostCode, /if \(!force && earPhaseNow\(\) === 'listen'\) return;/);
     assert.match(hostCode, /\{ ok: false, reason: 'ear-busy' \}/);
     assert.ok(!hostCode.includes('earQuiet'), 'earQuiet 应该已经删干净');
+  });
+
+  test('她的回话通道 /say-loud 不再按耳语状态让路（m24524 的声音丢失）', () => {
+    // 听.py 的 emit(reply) 与 /say-loud 几乎同刻，ear.js 的 idle 常晚一拍；
+    // 让路会把「她自己的回话」挡掉 → 说了没声音。
+    assert.ok(
+      !hostCode.includes('在听/在想，这条让路'),
+      '/say-loud 不该再按耳语状态让路',
+    );
+  });
+
+  test('心跳只给「在听」续命，不给「在想」续命（出声前闪一下的根因）', () => {
+    assert.match(ear, /if \(phase === 'listen'\) \{/, '心跳只在 listen 时装');
+    assert.match(ear, /if \(earPhaseNow === 'listen'\) void postEarPhase\('listen'\);/);
   });
 });

@@ -120,9 +120,12 @@ function reportEarPhase(phase) {
     clearInterval(earHeartbeat);
     earHeartbeat = null;
   }
-  if (phase !== 'idle') {
+  // 【汐儿 · 11-16 晚 m24524】心跳只给「在听」续命（长按说话怕中途掉状态）。
+  // 以前「在想」也心跳——生成+合成那一两秒心跳又补一次【在想】，于是出声前闪一下；
+  // 而且她开始说话后心跳还在把他按回「在想」，字和声的起点也对不上。
+  if (phase === 'listen') {
     earHeartbeat = setInterval(() => {
-      if (earPhaseNow !== 'idle') void postEarPhase(earPhaseNow);
+      if (earPhaseNow === 'listen') void postEarPhase('listen');
     }, 8000);
     if (typeof earHeartbeat.unref === 'function') earHeartbeat.unref();
   }
