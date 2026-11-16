@@ -222,7 +222,25 @@ async function peek() {
   if (peekFired) return;
   peekFired = true;
   appendEvent('peek', '');
-  await triggerMenu('陪伴：看一眼', 'peek');
+  // 11-09 晚：一级分支标题带状态（`看一眼 · 开 2 分钟：现在看一眼`），标签不再是常量，
+  // 先从 /state 的菜单快照里找那一项的真实标签；找不到（宿主还没刷新）再用旧常量兜一次。
+  let label = '看一眼：现在看一眼';
+  try {
+    const res = await fetch(petBase() + '/state', {
+      headers: process.env.DSH_PET_API_TOKEN ? { 'x-dsh-pet-token': process.env.DSH_PET_API_TOKEN } : {},
+    });
+    const data = await res.json();
+    // 11-09 晚：/state 的菜单快照在 sections.menu.data.items（外面还包一层 data），别读成 sections.menu.items
+    const snap = data?.sections?.menu?.data ?? data?.sections?.menu;
+    const items = Array.isArray(snap?.items) ? snap.items : [];
+    const hit = items.find(
+      (item) => item && item.owner === '本鱼陪伴' && String(item.label || '').endsWith('：现在看一眼'),
+    );
+    if (hit) label = String(hit.label);
+  } catch (e) {
+    appendEvent('peek-state-error', e && e.message ? e.message : String(e));
+  }
+  await triggerMenu(label, 'peek');
 }
 
 /** 按住键的自动重复也丢一份（和 peek 同一套去重，各算各的） */

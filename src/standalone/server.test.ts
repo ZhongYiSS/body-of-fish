@@ -11,8 +11,9 @@ import { createServer, request as httpRequest } from 'node:http';
 import type { IncomingMessage, Server, ServerResponse } from 'node:http';
 
 import type { RegisteredRoute, StandaloneLogger } from './context.ts';
-import { createRequestListener, listenStandaloneServer } from './server.ts';
+import { createRequestListener, listenStandaloneServer, PortBusyError } from './server.ts';
 import { createRequestSecurity } from './request-security.ts';
+import type { ProfileService } from './ai-profiles.ts';
 const security = createRequestSecurity();
 
 /** 静默日志器（测试只断言行为） */
@@ -225,6 +226,26 @@ describe('listenStandaloneServer —— 端口与关闭', () => {
 
   after(async () => {
     for (const close of closers.splice(0)) await close().catch(() => {});
+  });
+
+  test('strictPort：首选端口被占就直接报 PortBusyError，不再顺延', async () => {
+    const blocker = await occupyPort();
+    closers.push(blocker.close);
+    await assert.rejects(
+      () =>
+        listenStandaloneServer({
+          routes: [pluginLikeRoute()],
+          logger: silent,
+          security,
+          port: blocker.port,
+          strictPort: true,
+        }),
+      (error: unknown) => {
+        assert.equal(error instanceof PortBusyError, true);
+        assert.equal((error as PortBusyError).port, blocker.port);
+        return true;
+      },
+    );
   });
 
   test('首选端口被占用时向后顺延，关闭后端口真正释放', async () => {
@@ -482,4 +503,50 @@ test('bounded body replay preserves plugin readBody; chunked and stalled inputs 
   } finally {
     await server.close();
   }
+});
+
+describe('createRequestListener —— 模型方案（/standalone-pet/profiles）', () => {
+  const fakeProfiles = (log: string[]): ProfileService => ({
+    list: () => ({ activeId: 'b', profiles: [{ id: 'a', name: '方案 1', savedAt: '' }, { id: 'b', name: '本地', savedAt: '' }] }),
+    switchTo: async (id: string) => {
+      log.push('switch:' + id);
+      return { activeId: id, profiles: [] };
+    },
+    snapshot: () => {
+      log.push('snapshot');
+      return { activeId: 'b', profiles: [] };
+    },
+    create: async (name?: unknown) => {
+      log.push('create:' + String(name));
+      return { activeId: 'c', profiles: [] };
+    },
+    rename: (id: string, name: unknown) => {
+      log.push('rename:' + id + ':' + String(name));
+      return { activeId: id, profiles: [] };
+    },
+    remove: async (id: string) => {
+      log.push('remove:' + id);
+      return { activeId: 'a', profiles: [] };
+    },
+  });
+
+  test('GET 返回页签数据（activeId + profiles）', () => {
+    const listener = createRequestListener({ routes: [], logger: silent, security, profiles: fakeProfiles([]) });
+    const res = call(listener, '/standalone-pet/profiles');
+    assert.equal(res.status, 200);
+    assert.deepEqual(JSON.parse(res.body()), {
+      activeId: 'b',
+      profiles: [{ id: 'a', name: '方案 1', savedAt: '' }, { id: 'b', name: '本地', savedAt: '' }],
+    });
+  });
+
+  test('没装方案服务 → 503（宿主模式/老版本不该 500）', () => {
+    const listener = createRequestListener({ routes: [], logger: silent, security });
+    assert.equal(call(listener, '/standalone-pet/profiles').status, 503);
+  });
+
+  test('不支持的方法 → 405', () => {
+    const listener = createRequestListener({ routes: [], logger: silent, security, profiles: fakeProfiles([]) });
+    assert.equal(call(listener, '/standalone-pet/profiles', 'PUT').status, 405);
+  });
 });

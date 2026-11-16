@@ -8,9 +8,13 @@ export interface RequestSecurity {
   authorize(req: IncomingMessage, res: ServerResponse): boolean;
 }
 
-export function rejectRequest(res: ServerResponse, status: number, error: string): false {
+/**
+ * 拒绝一个请求。`reason` 是给排查用的机器可读标签（【本鱼 · 11-15】外部用户报 403 时，
+ * 桥只看得见一句话，分不清「没带令牌 / 格式不对 / 令牌不对」）。
+ */
+export function rejectRequest(res: ServerResponse, status: number, error: string, reason?: string): false {
   res.writeHead(status, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' });
-  res.end(JSON.stringify({ error }));
+  res.end(JSON.stringify(reason === undefined ? { error } : { error, reason }));
   return false;
 }
 
@@ -22,7 +26,7 @@ function publicRead(req: IncomingMessage): boolean {
   } catch {
     return false;
   }
-  if (['/standalone-ai/settings', '/standalone-pet/settings', '/shutdown'].includes(path)) return false;
+  if (['/standalone-ai/settings', '/standalone-pet/settings', '/standalone-pet/profiles', '/shutdown'].includes(path)) return false;
   if (/^\/dsh-pet-\d+\/(?:whisper|chat)(?:\/|$)/.test(path)) return false;
   return (
     [
@@ -80,12 +84,16 @@ export function createRequestSecurity(): RequestSecurity {
         return rejectRequest(res, 400, '请求地址无效');
       }
       const supplied = req.headers['x-dsh-pet-token'];
-      if (
-        typeof supplied !== 'string' ||
-        !/^[A-Za-z0-9_-]{43}$/.test(supplied) ||
-        !timingSafeEqual(Buffer.from(supplied), Buffer.from(token))
-      ) {
-        return rejectRequest(res, 403, '请从桌宠菜单重新打开设置');
+      const denied = '请从桌宠菜单重新打开设置';
+      if (typeof supplied !== 'string' || supplied === '') {
+        return rejectRequest(res, 403, denied, 'missing-token');
+      }
+      if (!/^[A-Za-z0-9_-]{43}$/.test(supplied)) {
+        // 带上引号/空格/`SESSDATA=` 那种脏值最容易落在这里
+        return rejectRequest(res, 403, denied, 'bad-token-format');
+      }
+      if (!timingSafeEqual(Buffer.from(supplied), Buffer.from(token))) {
+        return rejectRequest(res, 403, denied, 'token-mismatch');
       }
       return true;
     },

@@ -191,6 +191,63 @@
         font-size: calc(var(--f) * 0.7);
         letter-spacing: calc(var(--f) * 0.15);
       }
+      /* 【汐儿 · 11-16 m21310】状态提示气泡：独立于 say / lyric 的第三条通道。
+         宿主写 pets.<id>.hint = { items: [{ id, text, kind, ttlMs, at }] }，
+         这里按 id 做增删改，最多显示 4 行；任务类常驻、事件类由宿主自己到点删。
+         简约风格：小字、半透明、竖排，一行一件事，不抢头顶气泡。 */
+      .pet-hint {
+        /* 【汐儿 · 11-16 m21833】以前钉在 right:0.35em / top:26%，容器是窗口宽，
+           窗口一宽气泡就飘到离身体 240px 外。改成按身体尺寸摆、位置由 sprite.setHint 用 px 写，
+           这样「贴不贴身体」和窗口宽度无关，设置页拖出来的偏移量也才有意义。 */
+        position: absolute;
+        left: 0;
+        top: 0;
+        display: flex;
+        flex-direction: column;
+        align-items: flex-end;
+        gap: calc(var(--f0, 20px) * 0.16);
+        max-width: min(calc(var(--f0, 20px) * 11), 72%);
+        z-index: 6;
+        pointer-events: none;
+      }
+      .pet-hint-item {
+        padding: calc(var(--f0, 20px) * 0.1) calc(var(--f0, 20px) * 0.36);
+        /* 字号由 setHint 按配置写进 inline style（默认 15px，哥哥说 12.5 太小） */
+        border-radius: calc(var(--f0, 20px) * 0.7);
+        background: rgba(18, 34, 58, 0.62);
+        color: #e8f3ff;
+        font-family: var(
+          --dsh-pet-font-family,
+          'ShangshouSoftCandy',
+          'Yuanti SC',
+          'YouYuan',
+          '幼圆',
+          'Comic Sans MS',
+          'PingFang SC',
+          'Microsoft YaHei',
+          sans-serif
+        );
+        font-size: var(--hint-font, 15px);
+        line-height: 1.35;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        opacity: 0;
+        transform: translateY(calc(var(--f0, 20px) * -0.12));
+        transition:
+          opacity 0.12s ease,
+          transform 0.12s ease;
+        box-shadow: 0 calc(var(--f0, 20px) * 0.1) calc(var(--f0, 20px) * 0.4) rgba(0, 0, 0, 0.3);
+      }
+      .pet-hint-item.is-on {
+        opacity: 1;
+        transform: translateY(0);
+      }
+      .pet-hint-item.is-event {
+        /* 【汐儿 · 11-16 m22898】以前写死 calc(--f0*0.54)，比【在看】小一圈，
+           哥哥要两者一样大：字号统一交给 --hint-font，只用背景区分轻重。 */
+        background: rgba(30, 60, 96, 0.5);
+      }
       .pet-bub-row {
         display: flex;
         justify-content: space-between;

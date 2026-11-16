@@ -444,6 +444,152 @@ function packBase(
 }
 
 /** 一个覆盖文件 → 完整条目：顶层逐字段合并（没写/非法 → 内置默认 + 告警），pets 逐实例 */
+/**
+ * watch 段（陪伴的节奏与是否出声）——**只读出来、没有内置默认**：内置 assets/config.jsonc 里不写它，
+ * 用户层写了才带出（没写就没有这个键，消费端自己兜底 normal / 不吭声）。
+ * 形状校验：pace 只认 calm/normal/dense，speak 只认布尔；其余键（以后加的实验项）忽略。
+ * 为什么单列一个字段而不是塞进 GLOBAL_DEFAULT_KEYS：那是一组「有内置默认的成本/偏好」字段，
+ * watch 没有默认值，走那条会把它写成假默认，反而让用户层永远显式覆盖内置默认。
+ */
+const WATCH_PACE_SET: ReadonlySet<string> = new Set(['calm', 'normal', 'dense']);
+
+function watchSectionField(own: unknown, label: string): { watch?: Record<string, unknown> } {
+  if (own === undefined || own === null) return {};
+  if (typeof own !== "object" || Array.isArray(own)) {
+    warnOnce(label + ':watch', '「' + label + '」的 watch 非法，已忽略');
+    return {};
+  }
+  const src = own as Record<string, unknown>;
+  const out: Record<string, unknown> = {};
+  if (src.pace !== undefined && src.pace !== null) {
+    if (typeof src.pace === 'string' && WATCH_PACE_SET.has(src.pace)) out.pace = src.pace;
+    else warnOnce(label + ':watch.pace', '「' + label + '」的 watch.pace 非法，已忽略');
+  }
+  if (src.speak !== undefined && src.speak !== null) {
+    if (typeof src.speak === 'boolean') out.speak = src.speak;
+    else warnOnce(label + ':watch.speak', '「' + label + '」的 watch.speak 非法，已忽略');
+  }
+  // 【汐儿 · 11-10 m18312】tuning / prompt / talkGapSec / fallbackSec：
+  // 哥哥要「突变评分、提示词都放进设置里」。这几个键只在这里把关形状，具体范围由
+  // watch-mode.ts 的 normalizeTuning 夹（那边才是唯一一份默认值）。
+  if (src.tuning !== undefined && src.tuning !== null) {
+    if (typeof src.tuning === 'object' && !Array.isArray(src.tuning)) out.tuning = src.tuning;
+    else warnOnce(label + ':watch.tuning', '「' + label + '」的 watch.tuning 非法，已忽略');
+  }
+  // 【汐儿 · 11-11 m19324】四套提示词：prompt = 游戏（老键名不改，兼容已存的配置），
+  // 另外三套按屏幕分类各一份；空串 = 用包里那份默认。
+  for (const key of ['prompt', 'promptVideo', 'promptWeb', 'promptChat', 'detailPrompt'] as const) {
+    const value = src[key];
+    if (value === undefined || value === null) continue;
+    if (typeof value === 'string') out[key] = value.slice(0, 16000);
+    else warnOnce(label + ':watch.' + key, '「' + label + '」的 watch.' + key + ' 非法，已忽略');
+  }
+  for (const key of ['talkGapSec', 'fallbackSec'] as const) {
+    const value = src[key];
+    if (value === undefined || value === null) continue;
+    if (typeof value === 'number' && Number.isFinite(value) && value > 0) out[key] = value;
+    else warnOnce(label + ':watch.' + key, '「' + label + '」的 watch.' + key + ' 非法，已忽略');
+  }
+  // 【汐儿 · 11-16 m21257】mode：三档取景（全屏 / 自动 / 窗口）。
+  // 老的 game / video 还认（映射成 auto），老配置不用改；写坏了忽略、回落到 auto
+  // （消费端 normalizeWatchMode 再兜一层）。**白名单少一个值，写进去就会被静默丢掉**——
+  // 11-16 就因为这个，「模式」菜单点了没反应、设置页下拉永远弹回「自动」。
+  if (src.mode !== undefined && src.mode !== null) {
+    if (src.mode === 'full' || src.mode === 'auto' || src.mode === 'window') out.mode = src.mode;
+    else if (src.mode === 'game' || src.mode === 'video') out.mode = 'auto';
+    else warnOnce(label + ':watch.mode', '「' + label + '」的 watch.mode 非法，已忽略');
+  }
+  // 【汐儿 · 11-16】windowHwnd：窗口模式下「只截哪个窗口」的句柄；0 = 没选（按全屏）。
+  if (src.windowHwnd !== undefined && src.windowHwnd !== null) {
+    const n = Number(src.windowHwnd);
+    if (Number.isFinite(n) && n >= 0) out.windowHwnd = Math.round(n);
+    else warnOnce(label + ':watch.windowHwnd', '「' + label + '」的 watch.windowHwnd 非法，已忽略');
+  }
+  // 【汐儿 · 11-09】autoStart：上次是开着关掉的，重开身体就自己接着陪。
+  // 菜单开/关陪伴时写，哥哥 11-09 晚 m16399「重启后明明开着却没在看」的直接修法。
+  if (src.autoStart !== undefined && src.autoStart !== null) {
+    if (typeof src.autoStart === 'boolean') out.autoStart = src.autoStart;
+    else warnOnce(label + ':watch.autoStart', '「' + label + '」的 watch.autoStart 非法，已忽略');
+  }
+  return Object.keys(out).length > 0 ? { watch: out } : {};
+}
+
+/** subtitle 段：只有 sessData 一个键（B站登录信息，看视频抓字幕用）。
+ *  【汐儿 · 11-11 m19834】哥哥选「设置页填一次 SESSDATA」。空串 = 没填，抓字幕就老实放弃。 */
+function subtitleSectionField(own: unknown, label: string): { subtitle?: Record<string, unknown> } {
+  if (own === null || typeof own !== 'object' || Array.isArray(own)) return {};
+  const src = own as Record<string, unknown>;
+  const out: Record<string, unknown> = {};
+  if (src.sessData !== undefined && src.sessData !== null) {
+    if (typeof src.sessData === 'string') out.sessData = src.sessData.trim().slice(0, 4096);
+    else warnOnce(label + ':subtitle.sessData', '「' + label + '」的 subtitle.sessData 非法，已忽略');
+  }
+  return Object.keys(out).length > 0 ? { subtitle: out } : {};
+}
+
+/**
+ * search 段：只认 `enabled`（联网查资料的总开关，默认开）。
+ * 【11-11 m20199】哥哥：开关放状态子菜单、默认开。
+ */
+function searchSectionField(own: unknown, label: string): { search?: Record<string, unknown> } {
+  if (own === null || typeof own !== 'object' || Array.isArray(own)) return {};
+  const src = own as Record<string, unknown>;
+  const out: Record<string, unknown> = {};
+  if (src.enabled !== undefined && src.enabled !== null) {
+    if (typeof src.enabled === 'boolean') out.enabled = src.enabled;
+    else warnOnce(label + ':search.enabled', '「' + label + '」的 search.enabled 非法，已忽略');
+  }
+  return Object.keys(out).length > 0 ? { search: out } : {};
+}
+
+/**
+ * voice 段：只认 `volume`（0~100 的整数，默认 100 = 不额外降音）。
+ * 【汐儿 · 11-15】哥哥要「给语音加一个调节音量的设定」——只影响播放音量，不改 TTS 合成。
+ */
+// 【汐儿 · 11-16 m21833】hint：提示气泡（【在看】那层）的位置与字号。
+// x / y 是相对默认锚点的像素偏移（设置页拖预览直接写这两个数），size 是字号 px。
+// 白名单少一个键 = 写进去被静默丢掉（11-16 的 watch.mode 就是这么翻车的）。
+function hintSectionField(own: unknown, label: string): { hint?: Record<string, unknown> } {
+  if (own === null || typeof own !== 'object' || Array.isArray(own)) return {};
+  const src = own as Record<string, unknown>;
+  const out: Record<string, unknown> = {};
+  for (const spec of [
+    { key: 'x', min: -400, max: 400 },
+    { key: 'y', min: -400, max: 400 },
+    { key: 'size', min: 10, max: 22 },
+  ] as const) {
+    const raw = src[spec.key];
+    if (raw === undefined || raw === null) continue;
+    const n = typeof raw === 'number' ? raw : Number.NaN;
+    if (Number.isFinite(n) && n >= spec.min && n <= spec.max) out[spec.key] = Math.round(n);
+    else warnOnce(label + ':hint.' + spec.key, '「' + label + '」的 hint.' + spec.key + ' 非法，已忽略');
+  }
+  return Object.keys(out).length > 0 ? { hint: out } : {};
+}
+
+function voiceSectionField(own: unknown, label: string): { voice?: Record<string, unknown> } {
+  if (own === null || typeof own !== 'object' || Array.isArray(own)) return {};
+  const src = own as Record<string, unknown>;
+  const out: Record<string, unknown> = {};
+  if (src.volume !== undefined && src.volume !== null) {
+    const n = typeof src.volume === 'number' ? src.volume : Number.NaN;
+    if (Number.isFinite(n) && n >= 0 && n <= 100) out.volume = Math.round(n);
+    else warnOnce(label + ':voice.volume', '「' + label + '」的 voice.volume 非法，已忽略');
+  }
+  // 排队过期（秒）与句子间隔（毫秒）：哥哥 11-15 要在设置页调
+  for (const spec of [
+    { key: 'staleSec', min: 1, max: 600 },
+    { key: 'gapMs', min: 0, max: 5000 },
+  ] as const) {
+    const raw = src[spec.key];
+    if (raw === undefined || raw === null) continue;
+    const n = typeof raw === 'number' ? raw : Number.NaN;
+    if (Number.isFinite(n) && n >= spec.min && n <= spec.max) out[spec.key] = Math.round(n);
+    else warnOnce(label + ':voice.' + spec.key, '「' + label + '」的 voice.' + spec.key + ' 非法，已忽略');
+  }
+  return Object.keys(out).length > 0 ? { voice: out } : {};
+}
+
 function mergeEntry(
   base: Record<string, unknown>,
   overlay: Record<string, unknown> | undefined,
@@ -471,7 +617,15 @@ function mergeEntry(
     }
     out[key] = own;
   }
-  return out;
+  // watch 段：内置默认里没有这个键，不走上面的逐字段循环；用户层写了才带出（见 watchSectionField）
+  return {
+    ...out,
+    ...watchSectionField(overlay?.watch, label),
+    ...subtitleSectionField(overlay?.subtitle, label),
+    ...searchSectionField(overlay?.search, label),
+    ...voiceSectionField(overlay?.voice, label),
+    ...hintSectionField(overlay?.hint, label),
+  };
 }
 
 /** pets 数组合并：文件没写/空 → 默认列表；逐实例合并（缺字段 → 内置默认 pets[0]，静默）。 */

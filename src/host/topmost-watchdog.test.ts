@@ -138,7 +138,10 @@ describe('源码守卫 —— 置顶看门狗必须在 main.js 里按这套规�
 
   test('看门狗按判定函数 + 命名节拍运行，并在窗口关闭时停掉', () => {
     assert.ok(/shouldReassertTopmost\(/.test(main), '必须调用纯判定');
-    assert.ok(/TOPMOST_WATCHDOG_ENABLED/.test(watchdogBody()), '判定必须显式传入总开关，否则开关改了也不生效');
+    // 11-09 晚 m17114：总开关变成运行时可改的 topmostWatchdogOn（右键「更多」里的置顶开关），
+    // 初值仍来自 TOPMOST_WATCHDOG_ENABLED —— 两样都要在。
+    assert.ok(/topmostWatchdogOn/.test(watchdogBody()), '判定必须显式传入运行时开关，否则开关改了也不生效');
+    assert.ok(/let topmostWatchdogOn = TOPMOST_WATCHDOG_ENABLED;/.test(main), '开关初值必须来自看门狗常量');
     const body = watchdogBody();
     assert.ok(/win\.isDestroyed\(\)/.test(body), '判定必须带上"窗口已销毁"');
     assert.ok(/win\.isVisible\(\)/.test(body), '判定必须带上"窗口可见"（未 show 时不钉）');

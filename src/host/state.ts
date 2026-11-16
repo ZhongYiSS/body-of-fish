@@ -52,7 +52,7 @@ export type SectionName = 'balance' | 'workStatus' | 'notify' | 'config' | 'menu
  *  中间两个是**指令**（host → 前端），与 say/anim 同族：前端读到即执行，不往它们写任何东西。
  *  `lock` 不一样，它是**状态**不是指令：前端读它来决定"要不要冻结自己"（随机链不掷骰、暂停自播），
  *  并**按叶子里的 expiresAt 自己解除**——宿主侧没有定时器（见 ./lock 的第 4 条边界）。 */
-export type PetLeafName = 'say' | 'anim' | 'position' | 'throw' | 'lock' | 'lyric';
+export type PetLeafName = 'say' | 'anim' | 'position' | 'throw' | 'lock' | 'lyric' | 'hint';
 
 /** S 的完整形态（GET /state 的响应体）。
  *  `counter` = 整份 S 的版本号，就是"最后一次写入的编号"（见类里的 `last`）。
@@ -170,6 +170,7 @@ export class PollStateStore {
         throw: emptyLeaf(),
         lock: emptyLeaf(),
         lyric: emptyLeaf(),
+        hint: emptyLeaf(),
       };
       this.pets.set(petId, entry);
     }

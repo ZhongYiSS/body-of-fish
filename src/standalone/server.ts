@@ -10,6 +10,7 @@ import { publicSettings, validateSettings } from './settings';
 import type { StandaloneSettingsService } from './settings';
 import { settingsPage, settingsScript, settingsStyle } from './settings-page';
 import { petSettingsPage, petSettingsScript, petSettingsStyle } from './pet-settings-page';
+import type { ProfileService } from './ai-profiles';
 import { whisperPage, whisperScript, whisperStyle } from './whisper-page';
 
 export const DEFAULT_STANDALONE_PORT = 3080;
@@ -25,11 +26,18 @@ export interface StandaloneServerOptions {
   routes: RegisteredRoute[];
   logger: StandaloneLogger;
   port?: number;
+  /**
+   * 只认这一个端口，占不到就报错退出（【汐儿 · 11-15】哥哥选 A+B）。
+   * 默认 false 会顺延 25 个端口——那正是「两个实例同时活着」的漏洞。
+   */
+  strictPort?: boolean;
   status?: () => unknown;
   onShutdown?: () => void;
   security?: RequestSecurity;
   ai?: StandaloneSettingsService;
   pet?: StandalonePetSettingsService;
+  /** 模型方案（一页签一套：对话 + 看图 + 声音整份快照） */
+  profiles?: ProfileService;
   /** Override only for deterministic timeout tests. */
   bodyTimeoutMs?: number;
 }
@@ -194,6 +202,76 @@ function petSettingsHandler(
   };
 }
 
+/**
+ * 模型方案（哥哥 11-11 m19534）：一套方案 = 对话模型 + 看图 + 声音的整份快照。
+ *   GET  → { activeId, profiles:[{id,name,savedAt}] }
+ *   POST → { action: 'switch'|'snapshot'|'create'|'rename'|'remove', id?, name? } → 同上
+ * 切换会真的写盘（AI 设置 + 宠物配置的 model 段），所以照旧要令牌、限频。
+ */
+function profileHandler(
+  service: ProfileService | undefined,
+): (req: IncomingMessage, res: ServerResponse) => Promise<void> {
+  let windowStart = Date.now();
+  let count = 0;
+  const tooMany = (): boolean => {
+    if (Date.now() - windowStart >= 60000) {
+      windowStart = Date.now();
+      count = 0;
+    }
+    count += 1;
+    return count > 20;
+  };
+  return async (req, res) => {
+    if (!service) {
+      rejectRequest(res, 503, '模型方案尚未就绪');
+      return;
+    }
+    try {
+      if (req.method === 'GET' || req.method === 'HEAD') {
+        sendJson(res, 200, service.list());
+        return;
+      }
+      if (req.method !== 'POST') {
+        rejectRequest(res, 405, '仅支持 GET 或 POST');
+        return;
+      }
+      if (tooMany()) {
+        rejectRequest(res, 429, '点得太快了，请稍等一下');
+        return;
+      }
+      if (req.headers['content-type']?.split(';')[0].trim().toLowerCase() !== 'application/json') {
+        rejectRequest(res, 415, '请使用 JSON');
+        return;
+      }
+      const chunks: Buffer[] = [];
+      await new Promise<void>((resolve, reject) => {
+        req.on('data', (chunk: Buffer) => chunks.push(Buffer.from(chunk)));
+        req.once('end', resolve);
+        req.once('error', reject);
+      });
+      const raw = Buffer.concat(chunks);
+      if (raw.byteLength > MAX_SETTINGS_BYTES) {
+        rejectRequest(res, 413, '内容过大');
+        return;
+      }
+      const input: unknown = JSON.parse(raw.toString('utf8') || '{}');
+      const dict = input !== null && typeof input === 'object' && !Array.isArray(input)
+        ? (input as Record<string, unknown>)
+        : {};
+      const action = String(dict.action ?? '');
+      const id = typeof dict.id === 'string' ? dict.id : '';
+      if (action === 'switch') sendJson(res, 200, await service.switchTo(id));
+      else if (action === 'snapshot') sendJson(res, 200, service.snapshot());
+      else if (action === 'create') sendJson(res, 200, await service.create(dict.name));
+      else if (action === 'rename') sendJson(res, 200, service.rename(id, dict.name));
+      else if (action === 'remove') sendJson(res, 200, await service.remove(id));
+      else rejectRequest(res, 400, '不认识的动作');
+    } catch (error) {
+      rejectRequest(res, 400, error instanceof Error ? error.message : '模型方案没改成');
+    }
+  };
+}
+
 function dispatch(
   options: StandaloneServerOptions,
   shutdownSecurity?: RequestSecurity,
@@ -201,6 +279,7 @@ function dispatch(
   const settings = settingsHandler(options.ai);
   const tester = testHandler(options.ai);
   const petSettings = petSettingsHandler(options.pet);
+  const profiles = profileHandler(options.profiles);
   return (req, res, pathname) => {
     const method = req.method ?? 'GET';
     if (method === 'OPTIONS') {
@@ -268,6 +347,10 @@ function dispatch(
       void petSettings(req, res).catch((error: unknown) => fail(res, error, options.logger));
       return;
     }
+    if (pathname === '/standalone-pet/profiles') {
+      void profiles(req, res).catch((error: unknown) => fail(res, error, options.logger));
+      return;
+    }
     const route = options.routes.find((candidate) => matches(candidate, pathname));
     if (!route) {
       res.writeHead(404, { 'content-type': 'text/plain; charset=utf-8' });
@@ -315,8 +398,24 @@ export function createRequestListener(
   };
 }
 
-async function bindFirstFree(server: HttpServer, preferred: number, logger: StandaloneLogger): Promise<number> {
-  for (let port = preferred; port < preferred + PORT_SCAN_LIMIT; port += 1) {
+/** 端口被别的程序占着（严格模式下不再顺延）。 */
+export class PortBusyError extends Error {
+  readonly port: number;
+  constructor(port: number) {
+    super(`端口 ${port} 被占用`);
+    this.name = 'PortBusyError';
+    this.port = port;
+  }
+}
+
+async function bindFirstFree(
+  server: HttpServer,
+  preferred: number,
+  logger: StandaloneLogger,
+  strict = false,
+): Promise<number> {
+  const limit = strict ? 1 : PORT_SCAN_LIMIT;
+  for (let port = preferred; port < preferred + limit; port += 1) {
     try {
       await new Promise<void>((accept, reject) => {
         const onError = (error: Error): void => {
@@ -339,7 +438,7 @@ async function bindFirstFree(server: HttpServer, preferred: number, logger: Stan
       if ((error as NodeJS.ErrnoException).code !== 'EADDRINUSE') throw error;
     }
   }
-  throw new Error(`从 ${preferred} 起连续 ${PORT_SCAN_LIMIT} 个端口都被占用`);
+  throw strict ? new PortBusyError(preferred) : new Error(`从 ${preferred} 起连续 ${PORT_SCAN_LIMIT} 个端口都被占用`);
 }
 export async function listenStandaloneServer(options: StandaloneServerOptions): Promise<StandaloneServer> {
   const security = options.security;
@@ -347,7 +446,12 @@ export async function listenStandaloneServer(options: StandaloneServerOptions): 
   server.requestTimeout = 10000;
   server.headersTimeout = 10000;
   server.on('clientError', (_error, socket) => socket.destroy());
-  const port = await bindFirstFree(server, options.port ?? DEFAULT_STANDALONE_PORT, options.logger);
+  const port = await bindFirstFree(
+    server,
+    options.port ?? DEFAULT_STANDALONE_PORT,
+    options.logger,
+    options.strictPort === true,
+  );
   options.logger.info(`独立模式服务已监听 http://127.0.0.1:${port}/`);
   return {
     port,

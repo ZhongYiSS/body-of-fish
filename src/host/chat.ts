@@ -47,12 +47,16 @@ export interface ChatMemoryMessage {
 /** 单次生成超时（ms）：对话等 LLM 回复，60s 足够 */
 const TIMEOUT_MS = 60_000;
 
-/** 配图指令：附在 user 正文之后（紧邻回答位置，模型更容易遵守） */
+/** 配图指令：**进 system**，绝不写进 user 正文。
+ *  【汐儿 · 11-10】11-09 晚它被接在用户那句话尾巴上，小模型把「[配图]…[图:名称]」读成
+ *  「哥哥这轮带了图」，答出「哥哥还配了图」「只看到图的占位」。指令属于系统口径，不是用户说的话。 */
 function imageInstruction(pool: MemeEntry[]): string {
   return (
-    '\n\n[配图] 回复结尾可选附一张表情包给用户看，从下列清单里挑最贴合当前语境的：\n' +
+    '\n\n[可用表情包] 这是**你自己**可以附在回复里的表情包清单（哥哥并没有给你发图，也没有任何图片内容）。\n' +
+    '想在回复结尾附一张给哥哥看，就从下列清单里挑最贴合当前语境的：\n' +
     memeCatalog(pool) +
-    '\n挑中就在回复最后另起一行写 [图:名称]（名称原样照抄）；没有合适的就完全不要写这个标记。'
+    '\n挑中就在回复最后另起一行写 [图:名称]（名称原样照抄）；没有合适的就完全不要写这个标记。' +
+    '\n不要向哥哥描述清单里的图，也不要问他发的是什么图。'
   );
 }
 
@@ -129,7 +133,8 @@ async function generateWith(
   // 无 reasoning 元数据的模型（如 reasoningEfforts: false）显式传 off 会被
   // dsh-llm 判为 UNSUPPORTED_REASONING_EFFORT 并折叠成空流（表现为"模型未返回文本"）。
   const supportsOff = await supportsReasoningOff(ctx, sel.provider, sel.model);
-  // 配图：池非空才把清单与指令附进 user 正文（空池 = 关闭配图，正文与旧行为逐字一致）
+  // 配图：池非空才把清单与指令进 system（空池 = 关闭配图，与旧行为逐字一致）
+  // 【汐儿 · 11-10】原先拼在 user 正文尾巴上，导致模型以为用户发了图 —— 改成系统口径。
   const wantImage = pool.length > 0;
   const options = {
     provider: sel.provider,
@@ -139,11 +144,11 @@ async function generateWith(
     messages: [
       ...historyMessages,
       createUserMessage({
-        content: [{ type: 'text', text: wantImage ? userText + imageInstruction(pool) : userText }],
+        content: [{ type: 'text', text: userText }],
         source: { kind: 'user' },
       }),
     ],
-    system,
+    system: wantImage ? system + imageInstruction(pool) : system,
     // 不显式限 maxTokens：与碎碎念同因——推理模型把思考计入预算，显式小上限会截断正文；
     // 不传由 dsh-llm 按适配器 defaultMaxTokens 兜底，对话短回复输出仍短。
     temperature: 1,
@@ -197,15 +202,17 @@ export async function generateChatViaGateway(
   timeoutMs = TIMEOUT_MS,
 ): Promise<ChatGenerateResult> {
   const wantImage = pool.length > 0;
-  const userContent = wantImage ? userText + imageInstruction(pool) : userText;
+  // 【汐儿 · 11-10】配图清单进 system，user 正文保持纯文本（原先拼在用户那句尾巴上，
+  // 小模型会读成「哥哥给我发了图」）。
+  const systemContent = wantImage ? system + imageInstruction(pool) : system;
   const signal = AbortSignal.timeout(timeoutMs);
   let text = '';
   try {
     for await (const frame of gateway.chat({
       messages: [
-        { role: 'system', text: system },
+        { role: 'system', text: systemContent },
         ...history.map((m) => ({ role: m.role, text: m.content })),
-        { role: 'user', text: userContent },
+        { role: 'user', text: userText },
       ],
       signal,
     })) {

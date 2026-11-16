@@ -73,3 +73,30 @@ test('persists only in isolated home, redacts keys, supports keep and clear, rel
     rmSync(home, { recursive: true, force: true });
   }
 });
+
+test('extraHeaders: 只留干净的字符串头、键名去空格、设置页可编辑（m21833 起）、设置页存别的字段时不被冲掉', async () => {
+  const next = validateSettings(
+    {
+      extraHeaders: {
+        'x-opencode-session': 'body-of-fish',
+        '  X-Org  ': 'acme',
+        numeric: 5,
+        'bad key': 'v',
+        'x-long': 'y'.repeat(2000),
+      },
+    },
+    DEFAULT_AI_SETTINGS,
+  );
+  assert.deepEqual(next.extraHeaders, { 'x-opencode-session': 'body-of-fish', 'X-Org': 'acme' });
+  const home = mkdtempSync(join(tmpdir(), 'pet-ai-hdr-'));
+  try {
+    const store = createAiConfig(home);
+    await store.save({ ...configured, extraHeaders: { 'x-opencode-session': 'body-of-fish' } });
+    assert.equal('extraHeaders' in store.publicSettings(), true);
+    assert.equal(createAiConfig(home).current().extraHeaders['x-opencode-session'], 'body-of-fish');
+    await store.save({ model: 'next-model' });
+    assert.equal(store.current().extraHeaders['x-opencode-session'], 'body-of-fish');
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+  }
+});

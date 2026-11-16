@@ -36,6 +36,9 @@ const settingsSchema = z
     whisperIntervalSec: z.number().int().min(60).max(86400).optional(),
     maxTokens: z.number().int().min(128).max(4096).optional(),
     timeoutMs: z.number().int().min(1000).max(60000).optional(),
+    // 【汐儿 · 11-16】设置页「模型」页签能填请求头（opencode Go 这类网关要带自定义头）。
+    // 这里必须放行，否则整页保存被 .strict() 判成非法——具体清洗在 ai-config 的 sanitizeHeaders。
+    extraHeaders: z.record(z.string(), z.string()).optional(),
   })
   .strict();
 
@@ -54,6 +57,8 @@ const publicNames = [
   'whisperIntervalSec',
   'maxTokens',
   'timeoutMs',
+  // 【汐儿 · 11-16】不回显它，设置页那栏永远是空的，保存一次就把用户填的头冲掉；它也不是密钥。
+  'extraHeaders',
   'hasKey',
 ] as const;
 export function publicSettings(input: unknown): Record<string, unknown> {

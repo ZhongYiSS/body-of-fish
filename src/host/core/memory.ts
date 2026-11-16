@@ -15,7 +15,8 @@ export interface MemoryTurn {
   text: string;
   /** 毫秒时间戳 */
   at: number;
-  source: 'chat' | 'companion';
+  /** watch = 看护模式的观察笔记（本鱼 · 11-09 加：只记「变了什么」，不参与对话上下文） */
+  source: 'chat' | 'companion' | 'watch';
 }
 
 /** 会话接入点：非空表示现在跟着某个 DSH 会话走，短期记忆退化为展示。 */

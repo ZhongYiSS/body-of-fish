@@ -244,3 +244,62 @@ describe('compatChat 直调（超时/结构）', () => {
     );
   });
 });
+
+describe('extraHeaders（独立模式的自定义请求头）', () => {
+  test('自定义头真的上得了线，鉴权/传输头不被覆盖', async () => {
+    const holder = fakeFetch([{ status: 200, body: JSON.stringify({ choices: [{ message: { content: '好' } }] }) }]);
+    await compatChat(
+      {
+        baseUrl: 'https://go.test/v1',
+        model: 'm',
+        apiKey: 'sk-live',
+        extraHeaders: { 'x-opencode-session': 'body-of-fish', authorization: 'Bearer 假的', 'content-type': 'text/plain' },
+      },
+      [{ role: 'user', content: '嗨' }],
+      { fetchImpl: holder.impl },
+    );
+    const headers = holder.last?.init.headers as Record<string, string>;
+    assert.equal(headers['x-opencode-session'], 'body-of-fish');
+    assert.equal(headers.authorization, 'Bearer sk-live');
+    assert.equal(headers['content-type'], 'application/json');
+  });
+
+  test('网关只给「同一个接口」带自定义头：别的 baseUrl 一个都不带', async () => {
+    const holder = fakeFetch([
+      { status: 200, body: JSON.stringify({ choices: [{ message: { content: '好' } }] }) },
+      { status: 200, body: JSON.stringify({ choices: [{ message: { content: '嗯' } }] }) },
+    ]);
+    const gateway = createModelGateway({
+      readConfig: () => CFG(),
+      session: null,
+      fetchImpl: holder.impl,
+      extraHeaders: (baseUrl) =>
+        baseUrl === 'https://x.test/v1' ? { 'x-opencode-session': 'body-of-fish' } : undefined,
+    });
+    await collect(gateway.chat({ messages: [{ role: 'user', text: '嗨' }] }));
+    const hit = holder.last?.init.headers as Record<string, string>;
+    assert.equal(hit['x-opencode-session'], 'body-of-fish');
+  });
+
+  test('识图也走同一套头（哥哥 11-09 报「看一眼 400 MissingSessionID」）', async () => {
+    const holder = fakeFetch([
+      { status: 200, body: JSON.stringify({ choices: [{ message: { content: '一张桌面' } }] }) },
+    ]);
+    const gateway = createModelGateway({
+      readConfig: () =>
+        CFG({
+          vision: {
+            enabled: true,
+            backend: { kind: 'remote', baseUrl: 'https://go.test/v1', model: 'v', apiKey: 'k' },
+          },
+        }),
+      session: null,
+      fetchImpl: holder.impl,
+      extraHeaders: () => ({ 'x-opencode-session': 'body-of-fish' }),
+    });
+    const text = await gateway.vision(new Uint8Array([1, 2, 3]), '这是什么');
+    assert.equal(text, '一张桌面');
+    const hit = holder.last?.init.headers as Record<string, string>;
+    assert.equal(hit['x-opencode-session'], 'body-of-fish');
+  });
+});

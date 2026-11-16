@@ -52,6 +52,9 @@ export interface ModelGatewayDeps {
   session: SessionChat | null;
   fetchImpl?: typeof fetch;
   timeoutMs?: number;
+  /** 按后端 baseUrl 取额外的请求头（独立模式填的自定义头，只对**同一个**接口生效，
+   *  别的服务商一律不带 —— 免得把 Go 的会话头发给 DeepSeek）。 */
+  extraHeaders?(baseUrl: string): Record<string, string> | undefined;
 }
 
 /** 把 ChatRequest 的消息整理成 OpenAI 兼容形状（图片走 data URL 的部分留待需要时再读盘）。 */
@@ -113,7 +116,7 @@ export function createModelGateway(deps: ModelGatewayDeps): ModelGateway {
           text = await session.chat(request);
         } else {
           text = await compatChat(
-            { baseUrl: backend.kind === 'local' ? backend.endpoint : backend.baseUrl, model: modelOf(backend), apiKey: apiKeyOf(backend) },
+            compatBackend(backend, deps.extraHeaders),
             toCompatMessages(request),
             { ...options, signal: request.signal },
           );
@@ -125,16 +128,20 @@ export function createModelGateway(deps: ModelGatewayDeps): ModelGateway {
       }
     },
 
-    async vision(image: Uint8Array, prompt: string, signal?: AbortSignal): Promise<string> {
+    async vision(
+      image: Uint8Array,
+      prompt: string,
+      visionOptions?: { signal?: AbortSignal; onDelta?: (chunk: string) => void },
+    ): Promise<string> {
       const backend = backendFor('vision');
       if (backend.kind === 'session') {
         throw new ModelCallError('unsupported', '只有聊天能走会话，识图请选本地或网络');
       }
       return compatVision(
-        { baseUrl: backend.kind === 'local' ? backend.endpoint : backend.baseUrl, model: modelOf(backend), apiKey: apiKeyOf(backend) },
+        compatBackend(backend, deps.extraHeaders),
         image,
         prompt,
-        { ...options, signal },
+        { ...options, ...visionOptions },
       );
     },
 
@@ -178,7 +185,7 @@ export function createModelGateway(deps: ModelGatewayDeps): ModelGateway {
         );
       }
       return compatSpeak(
-        { baseUrl: backend.kind === 'local' ? backend.endpoint : backend.baseUrl, model: modelOf(backend), apiKey: apiKeyOf(backend) },
+        compatBackend(backend, deps.extraHeaders),
         text,
         { ...options, voice: speakOptions?.voice, signal: speakOptions?.signal },
       );
@@ -198,7 +205,7 @@ export function createModelGateway(deps: ModelGatewayDeps): ModelGateway {
                   messages: [{ role: 'user', text: '只回两个字：在的' }],
                 })
               : await compatChat(
-                  { baseUrl: backend.kind === 'local' ? backend.endpoint : backend.baseUrl, model: modelOf(backend), apiKey: apiKeyOf(backend) },
+                  compatBackend(backend, deps.extraHeaders),
                   [{ role: 'user', content: '只回两个字：在的' }],
                   { ...options, timeoutMs: options.timeoutMs ?? 20_000 },
                 );
@@ -210,7 +217,7 @@ export function createModelGateway(deps: ModelGatewayDeps): ModelGateway {
             backend.kind === 'session'
               ? ''
               : await compatVision(
-                  { baseUrl: backend.kind === 'local' ? backend.endpoint : backend.baseUrl, model: modelOf(backend), apiKey: apiKeyOf(backend) },
+                  compatBackend(backend, deps.extraHeaders),
                   png,
                   '这张图里有什么？只回一句。',
                   { ...options, timeoutMs: options.timeoutMs ?? 20_000 },
@@ -240,7 +247,7 @@ export function createModelGateway(deps: ModelGatewayDeps): ModelGateway {
                 { ...options, timeoutMs: options.timeoutMs ?? 60_000 },
               )
             : await compatSpeak(
-                { baseUrl: backend.kind === 'local' ? backend.endpoint : backend.baseUrl, model: modelOf(backend), apiKey: apiKeyOf(backend) },
+                compatBackend(backend, deps.extraHeaders),
                 '在的',
                 { ...options, timeoutMs: options.timeoutMs ?? 20_000 },
               );
@@ -252,6 +259,21 @@ export function createModelGateway(deps: ModelGatewayDeps): ModelGateway {
     },
   };
   return gateway;
+}
+
+/** 把一个后端落成适配器参数；远端顺手带上「只对同一接口生效」的自定义头。 */
+function compatBackend(
+  backend: Backend,
+  extraHeaders?: (baseUrl: string) => Record<string, string> | undefined,
+): { baseUrl: string; model: string; apiKey?: string; extraHeaders?: Record<string, string> } {
+  const baseUrl =
+    backend.kind === 'local' ? backend.endpoint : backend.kind === 'remote' ? backend.baseUrl : '';
+  return {
+    baseUrl,
+    model: modelOf(backend),
+    ...(backend.kind === 'remote' && backend.apiKey ? { apiKey: backend.apiKey } : {}),
+    ...(backend.kind === 'remote' ? { extraHeaders: extraHeaders?.(baseUrl) } : {}),
+  };
 }
 
 /** local 后端的 model 可省（LM Studio / 识图脚本按端点自己选）；remote 必填但类型上可能是空串。 */

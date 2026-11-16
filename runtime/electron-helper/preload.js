@@ -52,6 +52,13 @@ contextBridge.exposeInMainWorld('petBridge', {
   getClickThrough() {
     return ipcRenderer.invoke('pet:click-through-state');
   },
+  // 置顶（哥哥 11-09 晚：一直置顶 + 一个开关）
+  setTopmost(on) {
+    ipcRenderer.send('pet:topmost', !!on);
+  },
+  getTopmost() {
+    return ipcRenderer.invoke('pet:topmost-state');
+  },
   // 忙碌态配合 setInputRegions：拖拽持续捕获，菜单/聊天框外仍可点击其它应用。
   setInputBusy(busy) {
     ipcRenderer.send('pet:input-busy', !!busy);

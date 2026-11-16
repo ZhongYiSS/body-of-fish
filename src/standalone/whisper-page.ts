@@ -41,7 +41,7 @@ export const whisperScript = `
 (() => {
   const params = new URLSearchParams(location.hash.slice(1));
   const token = params.get('token') || '';
-  // 【本鱼 · 11-02】同一个输入小窗也服务「陪伴：自定义…」：?target=companion 时改填分钟数
+  // 【本鱼 · 11-02】同一个输入小窗也服务「看一眼：自定义…」：?target=companion 时改填分钟数
   const companion =
     params.get('target') === 'companion' || new URLSearchParams(location.search).get('target') === 'companion';
   history.replaceState(null, '', location.pathname);
@@ -67,14 +67,15 @@ export const whisperScript = `
     return response.json();
   }
   if (companion) {
-    document.title = '陪伴间隔';
-    const h1 = document.querySelector('h1'); if (h1) h1.textContent = '陪伴隔多久看一眼';
+    document.title = '看一眼间隔';
+    const local = document.querySelector('.local'); if (local) local.textContent = '独立桌宠 / 一眼看';
+    const h1 = document.querySelector('h1'); if (h1) h1.textContent = '看一眼隔多久看一次';
     const label = document.querySelector('label'); if (label) label.textContent = '间隔（分钟）';
     field.min = '1'; field.max = '1440';
-    const intro = document.querySelector('.intro'); if (intro) intro.textContent = '陪伴开着时按这个间隔截图看一眼，画面变了才说话。';
+    const intro = document.querySelector('.intro'); if (intro) intro.textContent = '一眼看开着时，按这个间隔截一张屏幕看一眼；不是游戏陪伴那种实时盯屏。';
   }
   async function load() {
-    if (!token) throw new Error(companion ? '请从桌宠右键菜单「陪伴 → 自定义…」打开。' : '请从桌宠右键菜单「碎碎念 → 自定义间隔…」打开。');
+    if (!token) throw new Error(companion ? '请从桌宠右键菜单「一眼看 → 自定义时间…」打开。' : '请从桌宠右键菜单「碎碎念 → 自定义间隔…」打开。');
     const data = await request('GET');
     if (companion) {
       const minutes = Math.max(1, Math.round(Number(data.companionIntervalMin) || 1));
@@ -99,7 +100,7 @@ export const whisperScript = `
         const minutes = Math.max(1, Math.round(Number(data.companionIntervalMin) || Number(field.value)));
         field.value = String(minutes);
         current.textContent = '当前：每 ' + minutes + ' 分钟';
-        message('已保存，下一次陪伴按新间隔走', 'ok');
+        message('已保存，下一次看一眼按新间隔走', 'ok');
         return;
       }
       const data = await request('POST', { whisperIntervalSec: Number(field.value) });

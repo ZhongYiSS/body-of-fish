@@ -14,6 +14,22 @@ export interface AiRequest {
 export type AiTransportEvent = { text?: string; refusal?: boolean };
 const quiet = { debug() {}, info() {}, warn() {}, error() {} };
 
+/** 这些头由我们自己决定：配置里的 extraHeaders 不许碰（防鉴权被顶掉、防 HTTP 层乱来）。 */
+const RESERVED_HEADERS = new Set([
+  'content-type',
+  'accept',
+  'authorization',
+  'x-api-key',
+  'anthropic-version',
+  'anthropic-beta',
+  'host',
+  'content-length',
+  'connection',
+  'transfer-encoding',
+  'cookie',
+  'set-cookie',
+]);
+
 /** SDKs can inherit custom auth headers from env even with explicit keys; rebuild headers. */
 export function isolatedFetch(settings: Readonly<StandaloneAiSettings>, fetcher: AiFetch): AiFetch {
   const base = settings.baseUrl.replace(/\/+$/, '');
@@ -41,6 +57,12 @@ export function isolatedFetch(settings: Readonly<StandaloneAiSettings>, fetcher:
         headers.set('anthropic-beta', 'server-side-fallback-2026-07-01');
       }
     } else headers.set('authorization', `Bearer ${settings.apiKey}`);
+    // 网关要求带的额外头（如 opencode Go 的 x-opencode-session）；鉴权/传输类一律不许覆盖
+    for (const [rawKey, value] of Object.entries(settings.extraHeaders ?? {})) {
+      const key = rawKey.trim();
+      if (!key || RESERVED_HEADERS.has(key.toLowerCase())) continue;
+      headers.set(key, value);
+    }
     return fetcher(url, { method: 'POST', body: init?.body, headers, signal: init?.signal, redirect: 'error' });
   };
 }

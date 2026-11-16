@@ -119,6 +119,21 @@ describe('插件宿主半边在独立模式下跑起来了', () => {
     assert.equal(meta.default, paths.defaultFile);
     assert.equal(meta.animations, join(home, 'body-of-fish', 'main-animation'));
   });
+
+  test('/watch-stats 今天还没出过图 → 200 空清单（设置页的面板靠它，不许 500）', async () => {
+    const response = await get('/dsh-pet-7340/watch-stats');
+    assert.equal(response.status, 200);
+    const body = response.json() as { ok: boolean; day: string; entries: unknown[] };
+    assert.equal(body.ok, true);
+    assert.match(body.day, /^\d{4}-\d{2}-\d{2}$/u);
+    assert.deepEqual(body.entries, []);
+    assert.equal(response.text.includes('"entries":[]'), true);
+  });
+
+  test('/watch-stats 只认 GET（面板以外的写法挡在外面）', async () => {
+    const response = await fetch(`${base}/dsh-pet-7340/watch-stats`, { method: 'POST', body: '{}' });
+    assert.equal(response.status, 405);
+  });
 });
 
 describe('配置与素材不可达时的口径 —— 显式失败，不静默兜底', () => {

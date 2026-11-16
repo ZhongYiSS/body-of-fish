@@ -49,7 +49,7 @@ export interface StandaloneAiService {
    * 看图与声音选「云端」时复用它：一个人在 AI 设置里填一次地址和密钥，
    * 不该为识图、TTS 再填两遍同样的东西（也就不会出现两处密钥不一致的怪事）。
    */
-  connection(): { baseUrl: string; model: string; apiKey: string };
+  connection(): { baseUrl: string; model: string; apiKey: string; extraHeaders: Record<string, string> };
   dispose(): void;
 }
 /** Optional third argument is an isolated transport/clock seam; production uses official SDKs. */
@@ -233,7 +233,14 @@ export function createStandaloneAi(
     isReady: ready,
     connection() {
       const current = store.current();
-      return { baseUrl: current.baseUrl, model: current.model, apiKey: current.apiKey };
+      // 自定义头也交出来：识图/嗓子走的是宿主侧的网关，它自己拼请求头，
+      // 不给这份的话接 opencode Go 时那两个接口会 400 MissingSessionID（哥哥 11-09 报）。
+      return {
+        baseUrl: current.baseUrl,
+        model: current.model,
+        apiKey: current.apiKey,
+        extraHeaders: current.extraHeaders ?? {},
+      };
     },
     async testConnection(input: { protocol?: string; baseUrl?: string; model?: string; apiKey?: string }) {
       if (disposed) return { ok: false, message: '服务已关闭' };
@@ -263,6 +270,9 @@ export function createStandaloneAi(
         whisperIntervalSec: 300,
         maxTokens: 32,
         timeoutMs: 15_000,
+        // 设置页看不到 extraHeaders（像 apiKey 一样藏着），测试连接得沿用配置里那份，
+        // 否则网关要求自定义头的接口永远测不过（哥哥 11-09 接 opencode Go 踩到）
+        extraHeaders: current.extraHeaders,
       };
 
       const controller = new AbortController();

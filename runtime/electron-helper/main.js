@@ -351,6 +351,9 @@ const POINTER_POLL_MS = 60;
 let pointerFallbackPaused = false;
 /** 避免误触：true = 所有宠物窗强制整窗穿透，渲染端上报的交互请求一律不生效（只能从托盘菜单关回来） */
 let forceIgnoreMouse = false;
+// 【本鱼 · 11-09 晚 m17114】置顶开关（全局一份）：默认跟随看门狗常量（= 开），
+// 右键「更多 ▸ 置顶」和托盘都能关；关掉就 setAlwaysOnTop(false)，不再每 5 秒重钉。
+let topmostWatchdogOn = TOPMOST_WATCHDOG_ENABLED;
 
 /**
  * 每窗口「渲染端正拿着鼠标输入」标记（win.id → true/false），由渲染端经 `pet:input-busy` 上报。
@@ -512,6 +515,7 @@ function createPetWindows() {
     // 之上，打断全屏游戏与截图。关闭的理由、代价、以及一个尚未解决的「显示桌面后误置顶」bug，
     // 都写在 topmost-watchdog.js 的文件头里 —— 要重新启用前请先读完那几节。
     let lastTopmostAssertMs = Date.now();
+    if (!topmostWatchdogOn) win.setAlwaysOnTop(false);
     const topmostTimer = setInterval(() => {
       const nowMs = Date.now();
       const due = shouldReassertTopmost(
@@ -522,7 +526,7 @@ function createPetWindows() {
           visible: win.isVisible(),
           paused: pointerFallbackPaused,
         },
-        TOPMOST_WATCHDOG_ENABLED,
+        topmostWatchdogOn,
       );
       if (!due) return;
       lastTopmostAssertMs = nowMs;
@@ -995,6 +999,15 @@ app.whenReady().then(() => {
 
   // 避免误触：宠物右键菜单 / 托盘菜单都能开，状态由主进程独占
   ipcMain.handle('pet:click-through-state', () => forceIgnoreMouse);
+  // 置顶开关：查询 + 设置（右键「更多」用；托盘/其它菜单以后也能用同一对通道）
+  ipcMain.handle('pet:topmost-state', () => topmostWatchdogOn);
+  ipcMain.on('pet:topmost', (_event, on) => {
+    topmostWatchdogOn = !!on;
+    for (const win of windows.values()) {
+      if (!win || win.isDestroyed()) continue;
+      win.setAlwaysOnTop(topmostWatchdogOn, topmostWatchdogOn ? topmostLevel(process.platform) : undefined);
+    }
+  });
   ipcMain.on('pet:click-through', (_event, on) => applyClickThrough(!!on));
 
   // 拖拽持有完整输入租约；菜单/对话则由 inputRegions 把交互限制在实际控件矩形内。

@@ -113,3 +113,46 @@ test('only minimal health, settings shell and known media GET are public; public
     );
   }
 });
+
+test('403 带机器可读 reason：没带 / 格式脏 / 对不上 分得开（本鱼 · 11-15 外部用户 403 排查）', () => {
+  const security = createRequestSecurity();
+  const capture = () => {
+    const res = {
+      status: 0,
+      body: '',
+      writeHead(status: number) {
+        this.status = status;
+      },
+      end(chunk?: string) {
+        this.body = String(chunk ?? '');
+      },
+    };
+    return res;
+  };
+  const cases: Array<[string | undefined, string]> = [
+    [undefined, 'missing-token'],
+    ['', 'missing-token'],
+    ['SESSDATA=abc', 'bad-token-format'],
+    ['x'.repeat(43), 'token-mismatch'],
+  ];
+  for (const [token, reason] of cases) {
+    const res = capture();
+    const headers: Record<string, string> = token === undefined ? {} : { 'x-dsh-pet-token': token };
+    assert.equal(
+      security.authorize(request(headers, '/private', 'POST'), res as unknown as ServerResponse),
+      false,
+    );
+    assert.equal(res.status, 403);
+    const body = JSON.parse(res.body) as { error: string; reason: string };
+    assert.equal(body.reason, reason);
+    assert.equal(body.error, '请从桌宠菜单重新打开设置');
+  }
+  // 正确的令牌照旧放行
+  assert.equal(
+    security.authorize(
+      request({ 'x-dsh-pet-token': security.token }, '/private', 'POST'),
+      capture() as unknown as ServerResponse,
+    ),
+    true,
+  );
+});

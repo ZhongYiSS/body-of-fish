@@ -15,6 +15,8 @@ import { z } from 'zod';
 
 import { writePrivateJson } from './ai-storage';
 import { parseModelConfig, toConfigSection } from '../host/core/model-config';
+import { DEFAULT_DETAIL_PROMPT, DEFAULT_WATCH_PROMPT } from '../host/game-talk';
+import { DEFAULT_TUNING, normalizeTuning } from '../host/watch-mode';
 
 /** 与 host/config.ts 的 CORNERS 同一份清单 */
 const CORNERS = ['top-left', 'top-right', 'bottom-left', 'bottom-right'] as const;
@@ -68,7 +70,7 @@ const patchSchema = z
     // 秒级间隔：右键菜单「碎碎念 → 自定义间隔…」走的小窗口用这个（哥哥要「能手动输入秒数」）。
     // 与上面的分钟字段写的是**同一个** eventsRefreshSec.whisper，两个入口不会打架。
     whisperIntervalSec: z.number().int().min(30).max(86_400).optional(),
-    // 【本鱼 · 11-02】陪伴间隔（分钟）：右键「陪伴：自定义…」的小窗用
+    // 【本鱼 · 11-02】看一眼间隔（分钟）：右键「看一眼：自定义…」的小窗用
     companionIntervalMin: z.number().int().min(1).max(1440).optional(),
     // 全局快捷键（Electron accelerator 写法）。空串 = 用默认 Alt+T / Alt+G / Alt+S。
     // 只允许 "修饰键+主键" 这种形状，别让用户把随便一串字符写进配置（写坏了热键就整组注册失败）。
@@ -92,6 +94,21 @@ const patchSchema = z
     voiceProtocol: z.enum(VOICE_PROTOCOLS).optional(),
     voiceRefAudio: z.string().trim().max(512).optional(),
     voicePromptText: z.string().trim().max(500).optional(),
+    // 【汐儿 · 11-16 m21257】取景三档 + 手动模式选的窗口
+    watchMode: z.enum(['full', 'auto', 'window']).optional(),
+    watchWindowHwnd: z.number().int().min(0).max(99_999_999).optional(),
+    // 【汐儿 · 11-16 m21452】识图与说话合成一次（默认开）
+    mergeLook: z.boolean().optional(),
+    // 【汐儿 · 11-15】播放音量 0~100（只影响播放，不改合成）
+    voiceVolume: z.number().int().min(0).max(100).optional(),
+    // 【汐儿 · 11-16 m21833】提示气泡：位置偏移 + 字号
+    // 【汐儿 · 11-16 m22720】不要 .int()：拖气泡预览算出来的是小数（如 12.4），
+    // 一个 0.4 像素的小数会把整份设置判成无效。取整由 applyPatch 做。
+    hintX: z.number().finite().min(-400).max(400).optional(),
+    hintY: z.number().finite().min(-400).max(400).optional(),
+    hintSize: z.number().finite().min(10).max(22).optional(),
+    voiceStaleSec: z.number().int().min(1).max(600).optional(),
+    voiceGapMs: z.number().int().min(0).max(5000).optional(),
     // 【11-01 哥哥第 3 条】识图/声音选「云端」时，接口地址与密钥**可以单独填**，
     // 不再只能沿用对话模型那份。语义：留空 = 沿用已有值；再空 = 宿主运行期从 AI 设置补
     // （fillCloudBackend 只补空位，所以这里填了就优先）。密钥不回显，只回 has 标记。
@@ -101,6 +118,36 @@ const patchSchema = z
     voiceBaseUrl: z.string().trim().max(2048).optional(),
     voiceApiKey: z.string().trim().max(8192).optional(),
     clearVoiceApiKey: z.boolean().optional(),
+    // 【汐儿 · 11-10 m18312】游戏陪伴：提示词全文可改 + 突变评分/尺寸/开口闸可调。
+    // 空串 = 用内置默认（页面上的「恢复默认」就是写空串以外的默认全文，两者都认）。
+    watchPrompt: z.string().max(16000).optional(),
+    // 【汐儿 · 11-11 m19324】四套提示词：watchPrompt 是游戏（老键名），另三套各一份
+    watchPromptVideo: z.string().max(16000).optional(),
+    watchPromptWeb: z.string().max(16000).optional(),
+    watchPromptChat: z.string().max(16000).optional(),
+    watchDetailPrompt: z.string().max(4000).optional(),
+    // 【汐儿 · 11-11 m19834】B站登录信息：看视频抓字幕用，只有这一处能填。
+    subtitleSessData: z.string().trim().max(4096).optional(),
+    watchCutAbs: z.number().min(1).max(255).optional(),
+    watchCutSpike: z.number().min(1).max(20).optional(),
+    watchCutGapSec: z.number().min(0).max(60).optional(),
+    watchIntegralLight: z.number().min(0.5).max(100).optional(),
+    watchKeyGapSec: z.number().min(0.2).max(10).optional(),
+    watchCutWidth: z.number().int().min(320).max(4096).optional(),
+    watchCutHeight: z.number().int().min(200).max(2560).optional(),
+    watchStillWidth: z.number().int().min(320).max(4096).optional(),
+    watchStillHeight: z.number().int().min(200).max(2560).optional(),
+    watchTalkGapSec: z.number().int().min(2).max(3600).optional(),
+    watchFallbackSec: z.number().int().min(10).max(36_000).optional(),
+    watchCalmMinGapSec: z.number().min(1).max(3600).optional(),
+    watchCalmIntegralSec: z.number().min(0.2).max(3600).optional(),
+    watchCalmFloorSec: z.number().min(5).max(36_000).optional(),
+    watchNormalMinGapSec: z.number().min(1).max(3600).optional(),
+    watchNormalIntegralSec: z.number().min(0.2).max(3600).optional(),
+    watchNormalFloorSec: z.number().min(5).max(36_000).optional(),
+    watchDenseMinGapSec: z.number().min(1).max(3600).optional(),
+    watchDenseIntegralSec: z.number().min(0.2).max(3600).optional(),
+    watchDenseFloorSec: z.number().min(5).max(36_000).optional(),
   })
   .strict();
 
@@ -111,6 +158,13 @@ export interface PetSettingsService {
   getSettings(): Record<string, unknown>;
   /** 只写白名单字段；返回保存后的当前值 */
   saveSettings(input: unknown): Promise<Record<string, unknown>>;
+  /**
+   * 配置里的 `model` 段原文（看图 / 声音 / 对话那张描述），仅供「模型方案」快照用。
+   * 不是给页面看的：页面要的那份在 getSettings() 里已经拍平了。
+   */
+  readModelSection(): Record<string, unknown>;
+  /** 整段写回 `model`（切方案用）；走同一套私有写盘 + 通知重开桌面小窗。 */
+  applyModelSection(model: Record<string, unknown>): void;
 }
 
 const MESSAGE =
@@ -118,7 +172,19 @@ const MESSAGE =
 
 export function validatePetSettings(input: unknown): PetSettingsPatch {
   const result = patchSchema.safeParse(input);
-  if (!result.success) throw new Error(MESSAGE);
+  if (!result.success) {
+    // 【汐儿 · 11-16 m22720】以前只抛一句笼统话，哥哥看不出是哪个字段越界，本鱼也查了两小时。
+    // 现在把出错的字段名列进提示（最多 6 个），下次一眼就能定位。
+    const names = [
+      ...new Set(
+        result.error.issues.flatMap((issue) =>
+          issue.code === 'unrecognized_keys' ? issue.keys : issue.path.map((part) => String(part)),
+        ),
+      ),
+    ].slice(0, 6);
+    const listed = names.length > 0 ? names.join('、') : '(根)';
+    throw new Error(MESSAGE + '（出错的字段：' + listed + '）');
+  }
   return result.data;
 }
 
@@ -196,6 +262,14 @@ export function viewOf(config: unknown): Record<string, unknown> {
   const display = String(pet?.display ?? FALLBACK.display);
   const family = String(font?.family ?? FALLBACK.fontFamily);
   const modelSection = parseModelConfig(root.model);
+  // 游戏陪伴：调参走 normalizeTuning（唯一一份默认值在 watch-mode.ts），模板空串 = 用默认
+  const watchSectionRaw = asDict(root.watch) ?? {};
+  const watchTuning = normalizeTuning(watchSectionRaw.tuning as Parameters<typeof normalizeTuning>[0]);
+  const watchPromptText = typeof watchSectionRaw.prompt === 'string' ? watchSectionRaw.prompt : '';
+  // 【汐儿 · 11-11 m19324】另三套：视频 / 网页 / 聊天
+  const watchPromptOf = (key: 'promptVideo' | 'promptWeb' | 'promptChat'): string =>
+    (typeof watchSectionRaw[key] === 'string' ? (watchSectionRaw[key] as string) : '');
+  const watchDetailText = typeof watchSectionRaw.detailPrompt === 'string' ? watchSectionRaw.detailPrompt : '';
   const modeOf = (capability: (typeof modelSection)['vision']): (typeof BACKENDS)[number] =>
     capability.enabled ? (capability.backend.kind === 'local' ? 'local' : 'remote') : 'off';
   const endpointOf = (capability: (typeof modelSection)['vision']): string =>
@@ -253,12 +327,55 @@ export function viewOf(config: unknown): Record<string, unknown> {
       return protocol === 'sovits' || protocol === 'system' || protocol === 'edge' ? protocol : 'openai';
     })(),
     voiceRefAudio: speakOf(modelSection.tts).refAudioPath ?? '',
+    voiceVolume: asInt(asDict(root.voice)?.volume, 100, 0, 100),
+    hintX: asInt(asDict(root.hint)?.x, 0, -400, 400),
+    hintY: asInt(asDict(root.hint)?.y, 0, -400, 400),
+    hintSize: asInt(asDict(root.hint)?.size, 15, 10, 22),
+    voiceStaleSec: asInt(asDict(root.voice)?.staleSec, 15, 1, 600),
+    voiceGapMs: asInt(asDict(root.voice)?.gapMs, 500, 0, 5000),
     voicePromptText: speakOf(modelSection.tts).promptText ?? '',
     // 云端后端自己的接口地址与密钥：地址回显（改起来方便），密钥只报"有没有"（不回显）
     visionBaseUrl: modelSection.vision.backend.kind === 'remote' ? modelSection.vision.backend.baseUrl : '',
     hasVisionKey: modelSection.vision.backend.kind === 'remote' ? Boolean(modelSection.vision.backend.apiKey) : false,
     voiceBaseUrl: modelSection.tts.backend.kind === 'remote' ? modelSection.tts.backend.baseUrl : '',
     hasVoiceKey: modelSection.tts.backend.kind === 'remote' ? Boolean(modelSection.tts.backend.apiKey) : false,
+    // 游戏陪伴（哥哥 m18312）：提示词 + 突变评分 + 开口闸回显；默认值一起送，页面「恢复默认」不用另请求
+    watchPrompt: watchPromptText,
+    watchDetailPrompt: watchDetailText,
+    // 取景三档 + 手动模式选的窗口（11-16 m21257）
+    watchMode: ((): string => {
+      const value = watchSectionRaw.mode;
+      return value === 'full' || value === 'window' ? value : 'auto';
+    })(),
+    watchWindowHwnd: asInt(watchSectionRaw.windowHwnd, 0, 0, 99_999_999),
+    // 识图与说话合成一次（默认开，11-16 m21452）：放在 model 段顶层，不属于任何一项能力
+    mergeLook: asDict(root.model)?.mergeLook !== false,
+    // B站 SESSDATA：回显（本地配置，不往外发），没填就是空串
+    subtitleSessData: (() => {
+      const section = asDict(root.subtitle);
+      const value = section?.sessData;
+      return typeof value === 'string' ? value : '';
+    })(),
+    watchPromptDefault: DEFAULT_WATCH_PROMPT,
+    watchDetailPromptDefault: DEFAULT_DETAIL_PROMPT,
+    watchTuningDefault: DEFAULT_TUNING,
+    watchCutAbs: watchTuning.cutAbs,
+    watchCutSpike: watchTuning.cutSpike,
+    watchCutGapSec: watchTuning.cutMinGapSec,
+    watchIntegralLight: watchTuning.integralLight,
+    watchStillWidth: watchTuning.stillWidth,
+    watchStillHeight: watchTuning.stillHeight,
+    watchTalkGapSec: asInt(watchSectionRaw.talkGapSec, 45, 2, 3600),
+    watchFallbackSec: asInt(watchSectionRaw.fallbackSec, 180, 10, 36_000),
+    watchCalmMinGapSec: watchTuning.paces.calm.minGapSec,
+    watchCalmIntegralSec: watchTuning.paces.calm.integralSec,
+    watchCalmFloorSec: watchTuning.paces.calm.floorSec,
+    watchNormalMinGapSec: watchTuning.paces.normal.minGapSec,
+    watchNormalIntegralSec: watchTuning.paces.normal.integralSec,
+    watchNormalFloorSec: watchTuning.paces.normal.floorSec,
+    watchDenseMinGapSec: watchTuning.paces.dense.minGapSec,
+    watchDenseIntegralSec: watchTuning.paces.dense.integralSec,
+    watchDenseFloorSec: watchTuning.paces.dense.floorSec,
     // 人格：实例级覆盖优先，没写就用条目（顶层）那份 —— 与 host 侧 ./persona 的 petPersona 同口径
     persona:
       typeof pet?.whisperPrompt === 'string' && pet.whisperPrompt.trim() !== ''
@@ -443,6 +560,92 @@ export function applyPatch(config: Dict, patch: PetSettingsPatch): Dict {
     }
     next.model = toConfigSection({ chat: current.chat, vision, tts });
   }
+  // 游戏陪伴（哥哥 m18312）：只写显式传进来的字段，其余原样保留
+  // 字幕登录信息：单独一段，不跟 watch 混（m19834）
+  if (patch.subtitleSessData !== undefined) {
+    next.subtitle = { ...(asDict(next.subtitle) ?? {}), sessData: patch.subtitleSessData.trim() };
+  }
+  // 播放音量：单独一段 voice（与嗓子后端 model.tts 分开，m20700）
+  if (patch.voiceVolume !== undefined || patch.voiceStaleSec !== undefined || patch.voiceGapMs !== undefined) {
+    const merged = { ...(asDict(next.voice) ?? {}) };
+    if (patch.voiceVolume !== undefined) merged.volume = Math.min(100, Math.max(0, Math.round(patch.voiceVolume)));
+    if (patch.voiceStaleSec !== undefined) {
+      merged.staleSec = Math.min(600, Math.max(1, Math.round(patch.voiceStaleSec)));
+    }
+    if (patch.voiceGapMs !== undefined) merged.gapMs = Math.min(5000, Math.max(0, Math.round(patch.voiceGapMs)));
+    next.voice = merged;
+  }
+  // 提示气泡的位置与字号（单独一段 hint，m21833）
+  if (patch.hintX !== undefined || patch.hintY !== undefined || patch.hintSize !== undefined) {
+    const merged = { ...(asDict(next.hint) ?? {}) };
+    if (patch.hintX !== undefined) merged.x = Math.min(400, Math.max(-400, Math.round(patch.hintX)));
+    if (patch.hintY !== undefined) merged.y = Math.min(400, Math.max(-400, Math.round(patch.hintY)));
+    if (patch.hintSize !== undefined) merged.size = Math.min(22, Math.max(10, Math.round(patch.hintSize)));
+    next.hint = merged;
+  }
+  const watchPatchTouched = [
+    patch.watchPrompt, patch.watchPromptVideo, patch.watchPromptWeb, patch.watchPromptChat,
+    patch.watchDetailPrompt, patch.watchCutAbs, patch.watchCutSpike,
+    patch.watchCutGapSec, patch.watchIntegralLight, patch.watchKeyGapSec,
+    patch.watchCutWidth, patch.watchCutHeight, patch.watchStillWidth, patch.watchStillHeight,
+    patch.watchTalkGapSec, patch.watchFallbackSec,
+    patch.watchCalmMinGapSec, patch.watchCalmIntegralSec, patch.watchCalmFloorSec,
+    patch.watchNormalMinGapSec, patch.watchNormalIntegralSec, patch.watchNormalFloorSec,
+    patch.watchDenseMinGapSec, patch.watchDenseIntegralSec, patch.watchDenseFloorSec,
+  ].some((value) => value !== undefined);
+  if (watchPatchTouched) {
+    const watch: Dict = { ...(asDict(next.watch) ?? {}) };
+    const tuning: Dict = { ...(asDict(watch.tuning) ?? {}) };
+    const paces: Dict = {
+      calm: { ...(asDict(asDict(tuning.paces)?.calm) ?? {}) },
+      normal: { ...(asDict(asDict(tuning.paces)?.normal) ?? {}) },
+      dense: { ...(asDict(asDict(tuning.paces)?.dense) ?? {}) },
+    };
+    const setNum = (key: string, value: number | undefined): void => {
+      if (value !== undefined) tuning[key] = value;
+    };
+    setNum("cutAbs", patch.watchCutAbs);
+    setNum("cutSpike", patch.watchCutSpike);
+    setNum("cutMinGapSec", patch.watchCutGapSec);
+    setNum("integralLight", patch.watchIntegralLight);
+    setNum("keySpacingSec", patch.watchKeyGapSec);
+    setNum("cutWidth", patch.watchCutWidth);
+    setNum("cutHeight", patch.watchCutHeight);
+    setNum("stillWidth", patch.watchStillWidth);
+    setNum("stillHeight", patch.watchStillHeight);
+    const setPace = (which: "calm" | "normal" | "dense", key: string, value: number | undefined): void => {
+      if (value === undefined) return;
+      paces[which] = { ...(asDict(paces[which]) ?? {}), [key]: value };
+    };
+    setPace("calm", "minGapSec", patch.watchCalmMinGapSec);
+    setPace("calm", "integralSec", patch.watchCalmIntegralSec);
+    setPace("calm", "floorSec", patch.watchCalmFloorSec);
+    setPace("normal", "minGapSec", patch.watchNormalMinGapSec);
+    setPace("normal", "integralSec", patch.watchNormalIntegralSec);
+    setPace("normal", "floorSec", patch.watchNormalFloorSec);
+    setPace("dense", "minGapSec", patch.watchDenseMinGapSec);
+    setPace("dense", "integralSec", patch.watchDenseIntegralSec);
+    setPace("dense", "floorSec", patch.watchDenseFloorSec);
+    if (Object.keys(paces.calm as Dict).length + Object.keys(paces.normal as Dict).length + Object.keys(paces.dense as Dict).length > 0) {
+      tuning.paces = paces;
+    }
+    if (Object.keys(tuning).length > 0) watch.tuning = tuning;
+    if (patch.watchPrompt !== undefined) watch.prompt = patch.watchPrompt;
+    // 【汐儿 · 11-11 m19324】另三套：空串照样写进去（= 用默认），恢复默认就是清空
+    if (patch.watchPromptVideo !== undefined) watch.promptVideo = patch.watchPromptVideo;
+    if (patch.watchPromptWeb !== undefined) watch.promptWeb = patch.watchPromptWeb;
+    if (patch.watchPromptChat !== undefined) watch.promptChat = patch.watchPromptChat;
+    if (patch.watchDetailPrompt !== undefined) watch.detailPrompt = patch.watchDetailPrompt;
+    if (patch.watchTalkGapSec !== undefined) watch.talkGapSec = patch.watchTalkGapSec;
+    if (patch.watchFallbackSec !== undefined) watch.fallbackSec = patch.watchFallbackSec;
+    if (patch.watchMode !== undefined) watch.mode = patch.watchMode;
+    if (patch.watchWindowHwnd !== undefined) watch.windowHwnd = patch.watchWindowHwnd;
+    next.watch = watch;
+  }
+  // 识图与说话合成一次：写在 model 段顶层（11-16 m21452）
+  if (patch.mergeLook !== undefined) {
+    next.model = { ...(asDict(next.model) ?? {}), mergeLook: patch.mergeLook };
+  }
   return next;
 }
 
@@ -472,6 +675,17 @@ export function createPetSettingsService(file: string, onChange?: () => void): P
       writePrivateJson(file, next);
       onChange?.();
       return viewOf(next);
+    },
+    readModelSection() {
+      // 读不出来（文件坏了）就给空对象，别让"存方案"这一步把页面卡死
+      const model = asDict(read().model);
+      return model ? { ...model } : {};
+    },
+    applyModelSection(model: Record<string, unknown>) {
+      const next = read();
+      next.model = { ...model };
+      writePrivateJson(file, next);
+      onChange?.();
     },
   };
 }

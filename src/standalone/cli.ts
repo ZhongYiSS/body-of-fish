@@ -21,6 +21,7 @@
  */
 import { existsSync } from 'node:fs';
 import { spawn } from 'node:child_process';
+import { dirname, join } from 'node:path';
 
 import { flattenPetList, readAllConfig } from '../host/config';
 import { dshHomeDir, packageRoot } from '../host/helper-process';
@@ -28,8 +29,9 @@ import { apply } from '../host/index';
 import { runCheck, packageVersion } from './check';
 import { createStandaloneAi } from './ai-provider';
 import { createPetSettingsService } from './pet-settings';
+import { createProfileService } from './ai-profiles';
 import { createRequestSecurity } from './request-security';
-import { writeStandaloneRuntime } from './runtime-state';
+import { acquireInstanceLock, writeStandaloneRuntime } from './runtime-state';
 import {
   createStandaloneContext,
   createStandaloneLogger,
@@ -37,7 +39,27 @@ import {
   type StandaloneLogger,
 } from './context';
 import { configPathsFor, describePets, isDesktopVisible, parseArgs, USAGE } from './options';
-import { listenStandaloneServer } from './server';
+import { listenStandaloneServer, PortBusyError } from './server';
+
+/** 告诉用户「已经开着一个了」——命令行没窗口，只能借系统弹一个框（不阻塞退出）。 */
+function notifyAlreadyRunning(logger: StandaloneLogger, pid: number): void {
+  logger.warn(`已经有一个桌宠在运行（pid ${pid}），这次不再启动：两个实例会抢数据目录和音频设备。`);
+  try {
+    const text = '本鱼已经开着一个了，这个就不开了。（同时开两个会抢声音。）';
+    const escaped = text.replace(/'/g, "''");
+    const script =
+      'Add-Type -AssemblyName System.Windows.Forms; ' +
+      `[System.Windows.Forms.MessageBox]::Show('${escaped}', '本鱼陪伴')`;
+    const child = spawn('powershell.exe', ['-NoProfile', '-NonInteractive', '-WindowStyle', 'Hidden', '-Command', script], {
+      detached: true,
+      stdio: 'ignore',
+      windowsHide: true,
+    });
+    child.unref();
+  } catch {
+    /* 弹不出来也不能影响退出 */
+  }
+}
 
 /** 启动独立模式：先起服务拿到端口，再 `apply`（插件据此拼桌面 Helper 的 configUrl） */
 async function run(logger: StandaloneLogger, options: { port: number }): Promise<void> {
@@ -56,11 +78,51 @@ async function run(logger: StandaloneLogger, options: { port: number }): Promise
 
   const routes: RegisteredRoute[] = [];
   const portRef = { value: options.port };
+  // 单实例（【汐儿 · 11-15】哥哥：「提示两个进程在抢声音，但我只开了一个」）：
+  // 原子锁 + 端口严格绑定，双保险（哥哥选 A+B）：
+  //   ① 锁：`openSync(..., 'wx')` 原子创建，挡住「同时启动」的竞态；陈旧锁靠 pid 探活清掉。
+  //   ② 端口：不再顺延 25 个端口，3080 占不到就退出——顺延正是第二套能活下来的原因。
+  const guard = acquireInstanceLock(home);
+  if (!guard.ok) {
+    notifyAlreadyRunning(logger, guard.pid);
+    return;
+  }
+  process.once('exit', guard.lock.release);
   const ai = createStandaloneAi(home, logger);
   // 保存桌宠设置后要让桌面小窗按新配置重开；重开接口在服务起来之后才存在，
   // 所以先留一个转发器，服务就绪后把真实实现填进去（配置落盘时机早于保存动作）。
   let reloadDesktop: () => void = () => {};
   const petSettings = createPetSettingsService(paths.userFile, () => reloadDesktop());
+  // 模型方案（哥哥 11-11 m19534）：一页签一套，切的时候把对话模型 + 看图 + 声音整份写回。
+  // 方案文件放桌宠配置同目录（机器写、不给人手改），密钥跟配置一样只在本机。
+  const profiles = createProfileService({
+    file: join(dirname(paths.userFile), 'ai-profiles.json'),
+    readSnapshot: () => {
+      const pub = ai.getSettings();
+      const conn = ai.connection();
+      return {
+        ai: {
+          protocol: pub.protocol,
+          baseUrl: pub.baseUrl,
+          model: pub.model,
+          enabled: pub.enabled,
+          automaticWhispers: pub.automaticWhispers,
+          whisperIntervalSec: pub.whisperIntervalSec,
+          maxTokens: pub.maxTokens,
+          timeoutMs: pub.timeoutMs,
+          apiKey: conn.apiKey,
+          extraHeaders: conn.extraHeaders,
+        },
+        model: petSettings.readModelSection(),
+      };
+    },
+    applyAi: async (settings) => {
+      await ai.saveSettings(settings);
+    },
+    applyModel: (model) => {
+      petSettings.applyModelSection(model);
+    },
+  });
   const security = createRequestSecurity();
   // 托盘「退出」要调的是后面才定义的 shutdown：同样用转发器解耦（apply 时它还没定义）
   let quitFromTray: () => void = () => {};
@@ -81,13 +143,17 @@ async function run(logger: StandaloneLogger, options: { port: number }): Promise
   // /shutdown 的回调要在服务构造时给出去，而停机函数要在服务之后定义：
   // 用一个可替换的转发器解耦（服务构造时只拿到"将来会是谁"）。
   let forwardShutdown: () => void = () => {};
-  const server = await listenStandaloneServer({
+  let server: Awaited<ReturnType<typeof listenStandaloneServer>>;
+  try {
+    server = await listenStandaloneServer({
     routes,
     logger,
     port: options.port,
+    strictPort: true,
     security,
     ai,
     pet: petSettings,
+    profiles,
     status: () => ({
       name: 'dsh-pet-standalone',
       pid: process.pid,
@@ -97,7 +163,17 @@ async function run(logger: StandaloneLogger, options: { port: number }): Promise
       uptimeSec: Math.round(process.uptime()),
     }),
     onShutdown: () => forwardShutdown(),
-  });
+    });
+  } catch (error) {
+    if (error instanceof PortBusyError) {
+      logger.error(
+        `端口 ${error.port} 被别的程序占着，身体起不来。先退出另一个身体，或关掉占用这个端口的程序，再试。`,
+      );
+      process.exitCode = 1;
+      return;
+    }
+    throw error;
+  }
   portRef.value = server.port;
   // 内部自请求：host 头由 fetch 自动填成本进程地址；鉴权只带 x-dsh-pet-token（别设 Origin）
   const internalRequest = async (path: string, init: RequestInit = {}): Promise<Response> =>

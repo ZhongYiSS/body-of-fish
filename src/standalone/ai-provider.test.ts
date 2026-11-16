@@ -368,3 +368,53 @@ test('testConnection checks parameters and reports success or friendly error', a
     },
   );
 });
+
+test('extraHeaders 上得了线，但绝不覆盖鉴权和传输类头', async () => {
+  const seen: Headers[] = [];
+  const settings = {
+    ...DEFAULT_AI_SETTINGS,
+    baseUrl: 'https://example.test/v1',
+    apiKey: 'test-secret',
+    extraHeaders: {
+      'x-opencode-session': 'body-of-fish',
+      Authorization: 'Bearer stolen',
+      'content-type': 'text/plain',
+      Host: 'evil.test',
+    },
+  };
+  const transport = isolatedFetch(settings, async (_url, init) => {
+    seen.push(new Headers(init?.headers));
+    return new Response('{}');
+  });
+  await transport('https://example.test/v1/chat/completions', { body: '{}' });
+  assert.equal(seen[0]?.get('x-opencode-session'), 'body-of-fish');
+  assert.equal(seen[0]?.get('authorization'), 'Bearer test-secret');
+  assert.equal(seen[0]?.get('content-type'), 'application/json');
+  assert.equal(seen[0]?.get('host'), null);
+});
+
+test('设置页的测试连接沿用配置里的 extraHeaders（网关要自定义头的接口才测得过）', async () => {
+  let request: RequestInit | undefined;
+  const home = mkdtempSync(join(tmpdir(), 'pet-ai-hdr-'));
+  const ai = createStandaloneAi(home, silent, {
+    fetch: async (_url, init) => {
+      request = init;
+      const chunks = [{ choices: [{ index: 0, delta: { content: 'hi' } }] }];
+      return new Response(chunks.map((c) => `data: ${JSON.stringify(c)}\n\n`).join('') + 'data: [DONE]\n\n', {
+        headers: { 'content-type': 'text/event-stream' },
+      });
+    },
+  });
+  try {
+    await ai.saveSettings({ ...config, extraHeaders: { 'x-opencode-session': 'body-of-fish' } });
+    const tested = await ai.testConnection({});
+    assert.equal(tested.ok, true);
+    assert.match(String(tested.message), /连接成功/);
+    const headers = new Headers(request?.headers);
+    assert.equal(headers.get('x-opencode-session'), 'body-of-fish');
+    assert.equal(headers.get('authorization'), 'Bearer test-secret');
+  } finally {
+    ai.dispose();
+    rmSync(home, { recursive: true, force: true });
+  }
+});

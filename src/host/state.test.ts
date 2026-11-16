@@ -78,13 +78,13 @@ describe('PollStateStore —— 写入与读取', () => {
     assert.equal(store.read().sections.notify.data, null);
   });
 
-  test('宠物条目的六个槽位一起建好（没写过的槽位是 {counter:0, data:null}）', () => {
+  test('宠物条目的七个槽位一起建好（没写过的槽位是 {counter:0, data:null}）', () => {
     const store = new PollStateStore();
     store.writePet('main', 'position', { x: 0.5, y: 0.5, mode: 'spring' });
     const entry = store.read().pets.main;
     // 形状恒定：只要被写过任意一个叶子，所有键就都存在（消费端不必判 undefined）
     // 【本鱼改造 · 歌词气泡】第六个槽位 lyric 是后加的旁挂叶子，见 ./core/create-pet-core.ts
-    assert.deepEqual(Object.keys(entry).sort(), ['anim', 'lock', 'lyric', 'position', 'say', 'throw']);
+    assert.deepEqual(Object.keys(entry).sort(), ['anim', 'hint', 'lock', 'lyric', 'position', 'say', 'throw']);
     assert.deepEqual(entry.position.data, { x: 0.5, y: 0.5, mode: 'spring' });
     assert.deepEqual(entry.say, { counter: 0, data: null }, '没写过的槽位保持空叶子');
     assert.deepEqual(entry.anim, { counter: 0, data: null });

@@ -39,6 +39,19 @@ export function createMemoryStore(options: MemoryStoreOptions): MemoryStore {
   let session: SessionSource | null = null;
   const cache = new Map<string, DayFile>();
 
+  // 【本鱼 · 11-09 晚】remember / digest 都是「读整份 → 改 → 整份重写」，
+  // 陪伴笔记、对话、日记同时在写时会互相覆盖（后写的拿旧快照把别人刚追加的抹掉）。
+  // 一条 Promise 链把所有「改文件」的操作串起来 —— 单进程内谁也别插队。
+  let writeChain: Promise<unknown> = Promise.resolve();
+  const serialize = <T>(fn: () => Promise<T>): Promise<T> => {
+    const run = writeChain.then(fn, fn);
+    writeChain = run.then(
+      () => undefined,
+      () => undefined,
+    );
+    return run;
+  };
+
   const fileOf = (key: string) => join(dir, `${key}.json`);
 
   async function load(key: string): Promise<DayFile> {
@@ -70,15 +83,17 @@ export function createMemoryStore(options: MemoryStoreOptions): MemoryStore {
     async remember(turn) {
       const at = turn.at ?? now();
       const key = dayKey(at);
-      const day = await load(key);
       const text = turn.text.trim();
       if (!text) return;
-      // 连续重复的那句不重复记（模型偶尔会连说两遍一模一样的话）
-      const last = day.turns[day.turns.length - 1];
-      if (last && last.text === text && last.role === turn.role) return;
-      day.turns.push({ role: turn.role, text, at, source: turn.source });
-      if (day.turns.length > TURNS_MAX) day.turns.splice(0, day.turns.length - TURNS_MAX);
-      await save(day);
+      await serialize(async () => {
+        const day = await load(key);
+        // 连续重复的那句不重复记（模型偶尔会连说两遍一模一样的话）
+        const last = day.turns[day.turns.length - 1];
+        if (last && last.text === text && last.role === turn.role) return;
+        day.turns.push({ role: turn.role, text, at, source: turn.source });
+        if (day.turns.length > TURNS_MAX) day.turns.splice(0, day.turns.length - TURNS_MAX);
+        await save(day);
+      });
     },
 
     async today(limit = 40) {
@@ -90,12 +105,14 @@ export function createMemoryStore(options: MemoryStoreOptions): MemoryStore {
       const trimmed = text.trim();
       if (!trimmed) return;
       const key = dayKey(now());
-      const day = await load(key);
-      const existing = day.diary ?? '';
-      if (existing.includes(trimmed)) return;
-      const next = existing ? `${existing}\n${trimmed}` : trimmed;
-      day.diary = next.length > DIARY_MAX_CHARS ? next.slice(0, DIARY_MAX_CHARS) : next;
-      await save(day);
+      await serialize(async () => {
+        const day = await load(key);
+        const existing = day.diary ?? '';
+        if (existing.includes(trimmed)) return;
+        const next = existing ? `${existing}\n${trimmed}` : trimmed;
+        day.diary = next.length > DIARY_MAX_CHARS ? next.slice(0, DIARY_MAX_CHARS) : next;
+        await save(day);
+      });
     },
 
     async todayDiary() {
@@ -145,6 +162,8 @@ function isTurn(value: unknown): value is MemoryTurn {
     (t.role === 'user' || t.role === 'pet') &&
     typeof t.text === 'string' &&
     typeof t.at === 'number' &&
-    (t.source === 'chat' || t.source === 'companion')
+    // 【本鱼 · 11-09 晚】漏了 'watch'：识图笔记落盘后一重启就被这个过滤整批丢掉，
+    // 所以语音那会「陪伴明明活着、记忆里却一条笔记都没有」（m17006 哥哥报声音/记忆不对）。
+    (t.source === 'chat' || t.source === 'companion' || t.source === 'watch')
   );
 }

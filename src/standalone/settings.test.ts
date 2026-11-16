@@ -45,6 +45,14 @@ test('public settings are an allowlist even if backend accidentally includes cre
   assert.deepEqual(actual, { protocol: 'anthropic', hasKey: true, model: 'x', enabled: false });
   assert.equal(JSON.stringify(actual).includes('never expose'), false);
 });
+
+// 【汐儿 · 11-16】请求头要能回显、能存：opencode Go 这类网关不带自定义头就 400
+test('请求头：能过校验、能回显，密钥照样不会露出来', () => {
+  const parsed = validateSettings({ extraHeaders: { 'x-opencode-session': 'body-of-fish' } });
+  assert.deepEqual(parsed.extraHeaders, { 'x-opencode-session': 'body-of-fish' });
+  const shown = publicSettings({ extraHeaders: { 'x-a': 'b' }, apiKey: 'secret', hasKey: true });
+  assert.deepEqual(shown, { extraHeaders: { 'x-a': 'b' }, hasKey: true });
+});
 test('老地址只做跳转：不乱存数据、不要求密码、把令牌带过去', () => {
   assert.match(settingsPage, /lang="zh-CN"/);
   // 这页没有表单了（设置合成一页），所以没有密码框、没有提交按钮

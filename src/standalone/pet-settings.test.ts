@@ -1,4 +1,5 @@
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { petSettingsPage, petSettingsScript, petSettingsStyle } from './pet-settings-page.ts';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
@@ -121,6 +122,17 @@ test('persona（人格）：实例级优先 → 条目级 → 空串，写进去
 
 test('validatePetSettings：人格过长被拒（不会把配置文件写成几万字）', () => {
   assert.throws(() => validatePetSettings({ persona: 'x'.repeat(4001) }), /桌宠设置无效/);
+});
+
+test('validatePetSettings：报错里点名出错的字段（11-16 m22720）', () => {
+  assert.throws(() => validatePetSettings({ size: 20 }), /出错的字段：size/u);
+  assert.throws(() => validatePetSettings({ nope: 1 }), /出错的字段：nope/u);
+});
+
+test('validatePetSettings：气泡偏移量是小数也收，写盘时取整（11-16 m22720）', () => {
+  const patch = validatePetSettings({ hintX: 12.4, hintY: -3.6, hintSize: 14.5 });
+  const next = applyPatch({}, patch);
+  assert.deepEqual(next.hint, { x: 12, y: -4, size: 15 });
 });
 
 test('validatePetSettings：越界、未知键、类型错都拒绝，并给同一句可操作提示', () => {
@@ -256,4 +268,131 @@ test('声音协议：sovits 的参考音写进 model.tts，切回 openai 就清�
 test('声音协议：只认 openai / sovits，参考音有长度上限', () => {
   assert.throws(() => validatePetSettings({ voiceProtocol: 'vits' }));
   assert.throws(() => validatePetSettings({ voiceRefAudio: 'x'.repeat(513) }));
+});
+
+
+test('设置页：模型三页签与三个面板都在，默认打开对话', () => {
+    for (const name of ['chat', 'vision', 'voice']) {
+      assert.ok(petSettingsPage.includes('data-mtab="' + name + '"'), '缺页签 ' + name);
+      assert.ok(petSettingsPage.includes('data-mpane="' + name + '"'), '缺面板 ' + name);
+    }
+    assert.ok(petSettingsPage.includes('class="mpane is-on" data-mpane="chat"'));
+    assert.ok(!petSettingsPage.includes('class="mpane is-on" data-mpane="voice"'));
+});
+
+test('设置页：页签脚本和样式在，且没跟提示词页签抢类名', () => {
+    assert.ok(petSettingsScript.includes('showModelTab'));
+    assert.ok(petSettingsStyle.includes('.mpane.is-on'));
+    assert.ok(!petSettingsPage.includes('class="tab is-on" data-tab="chat"'));
+  });
+
+test('设置页：脚本是合法 JS（写进字符串时别混进 TS 语法）', () => {
+  assert.doesNotThrow(() => new Function(petSettingsScript));
+});
+
+// 【汐儿 · 11-11 m19834】B站登录信息：设置页填一次，存进宠物配置的 subtitle.sessData
+test('B站 SESSDATA：回显、保存、清空', () => {
+  assert.equal(viewOf({}).subtitleSessData, '');
+  const saved = applyPatch({}, { subtitleSessData: ' SESSDATA=abc; bili_jct=def ' });
+  const section = saved.subtitle as Record<string, unknown>;
+  assert.equal(section.sessData, 'SESSDATA=abc; bili_jct=def');
+  assert.equal(viewOf(saved as never).subtitleSessData, 'SESSDATA=abc; bili_jct=def');
+  // 不改这块的时候别把它冲掉
+  const other = applyPatch(saved as never, { name: '小蓝' });
+  assert.equal((other.subtitle as Record<string, unknown>).sessData, 'SESSDATA=abc; bili_jct=def');
+  const cleared = applyPatch(saved as never, { subtitleSessData: '' });
+  assert.equal((cleared.subtitle as Record<string, unknown>).sessData, '');
+});
+
+// 【汐儿 · 11-15】播放音量：默认 100、存得住、不冲掉别的键
+test('播放音量：默认 100，保存后读回来，不动别的键', () => {
+  assert.equal(viewOf({}).voiceVolume, 100);
+
+  const saved = applyPatch({}, { voiceVolume: 35 });
+  assert.equal(viewOf(saved).voiceVolume, 35);
+  assert.equal((saved.voice as Record<string, unknown>).volume, 35);
+
+  // 0 与 100 两头都得留得住（0 是最容易被当成「没填」的那种值）
+  assert.equal(viewOf(applyPatch(saved, { voiceVolume: 0 })).voiceVolume, 0);
+  assert.equal(viewOf(applyPatch(saved, { voiceVolume: 100 })).voiceVolume, 100);
+
+  // 不改这块的时候别把音量冲掉
+  const other = applyPatch(saved, { name: '小蓝' });
+  assert.equal(viewOf(other).voiceVolume, 35);
+});
+
+// 【汐儿 · 11-15】设置页：四个大项页签 + 音量滑杆，且默认只开一页
+test('设置页：大项页签与音量滑杆都在，默认只开一页', () => {
+  for (const pane of ['look', 'model', 'watch', 'more']) {
+    assert.ok(petSettingsPage.includes('data-gtab="' + pane + '"'), '缺页签 ' + pane);
+    assert.ok(petSettingsPage.includes('data-gpane="' + pane + '"'), '缺面板 ' + pane);
+  }
+  assert.ok(petSettingsPage.includes('id="voiceVolume"'));
+  assert.equal((petSettingsPage.match(/class="gpane is-on"/g) ?? []).length, 1);
+  assert.ok(petSettingsScript.includes('function showPane('));
+});
+
+// 【汐儿 · 11-16】只 `new Function` 编译挡不住「初始化时读未初始化的 const」这种错：
+// 那次 HINT_BASE 写在 showHint() 调用点后面，脚本一加载就 ReferenceError，整页空白
+// （哥哥报「我的设置全都不见了 + 字号位置不生效」）。所以这里拿假 DOM 真跑一遍。
+test('设置页：脚本真跑一遍不报错，且能把值填进控件', async () => {
+  const ids = [...new Set([...petSettingsPage.matchAll(/id="([a-zA-Z0-9_-]+)"/g)].map((m) => m[1]))];
+  const els = new Map(
+    ids.map((id) => [
+      id,
+      {
+        id, value: '', checked: false, textContent: '', href: '', dataset: {}, style: {},
+        options: [], classList: { add() {}, remove() {}, contains: () => false, toggle() {} },
+        addEventListener() {}, appendChild() {}, removeChild() {}, remove() {},
+        querySelector: () => null, querySelectorAll: () => [], setAttribute() {}, getAttribute: () => null,
+        getBoundingClientRect: () => ({ left: 0, top: 0, width: 100, height: 100 }), focus() {}, click() {},
+      },
+    ]),
+  );
+  const pet = { name: '小蓝', size: 560, hintX: 30, hintY: -20, hintSize: 18, voiceVolume: 40, watchMode: 'window' };
+  const ai = { baseUrl: 'https://x.test', model: 'm', extraHeaders: { 'x-a': 'b' }, hasKey: true };
+  const errors: string[] = [];
+  const g = globalThis as Record<string, unknown>;
+  const saved = {
+    document: g.document, location: g.location, history: g.history, fetch: g.fetch, localStorage: g.localStorage, window: g.window,
+  };
+  g.document = {
+    getElementById: (id: string) => els.get(id) ?? null,
+    createElement: (tag: string) => ({ ...els.get(ids[0] as string), id: 'new-' + tag, options: [], style: {} }),
+    querySelector: () => null, querySelectorAll: () => [], addEventListener() {}, body: { appendChild() {} },
+  };
+  g.location = { hash: '#token=t', pathname: '/standalone-pet/', search: '', replace() {} };
+  g.history = { replaceState() {} };
+  g.localStorage = { getItem: () => null, setItem() {}, removeItem() {} };
+  g.window = g;
+  const asked: string[] = [];
+  g.fetch = async (url: string) => {
+    asked.push(String(url));
+    return {
+      ok: true, status: 200,
+      json: async () =>
+        url.includes('/windows')
+          ? { ok: true, windows: [{ hwnd: 111, title: '记事本', exe: 'notepad' }] }
+          : url.includes('standalone-ai')
+            ? ai
+            : url.includes('profiles')
+              ? { profiles: [], activeId: '' }
+              : pet,
+    };
+  };
+  try {
+    new Function(petSettingsScript)();
+    await new Promise((r) => setTimeout(r, 120));
+  } catch (error) {
+    errors.push(String(error));
+  } finally {
+    Object.assign(g, saved);
+  }
+  assert.deepEqual(errors, []);
+  assert.equal(els.get('name')?.value, '小蓝');
+  assert.equal(els.get('hintSize')?.value, '18');
+  assert.equal(els.get('extraHeaders')?.value, 'x-a: b');
+  // 【汐儿 · 11-16 m22898】窗口下拉要靠 loadWindows 现拉一次；以前路由常量写错成 ROUTE，
+  // ReferenceError 被空 catch 吞掉，页面看着正常、下拉永远只有「（没选，按全屏）」一项。
+  assert.ok(asked.some((url) => url.includes('/dsh-pet-7340/windows')), '必须请求过窗口列表：' + asked.join(','));
 });

@@ -65,6 +65,8 @@ class PetSprite {
     // 「避免误触」（整窗点击穿透）当前状态：开 = 身体点不到，点击会透到后面的窗口。
     // 真值在主进程（托盘菜单也能改），开菜单时用 syncClickThrough() 读回；这里只作显示缓存。
     this.clickThroughOn = false;
+    // 置顶状态（真值在 main 进程）：默认开；开菜单时 syncTopmost() 读回一次。
+    this.topmostOn = true;
     // 拖拽抛掷物理参数（顶层全局；拍平已吹入实例，兜底回全局/默认）
     this.physics = pet.physics || config.physics || S.DEFAULT_PHYSICS;
     // 字体（全局一份；拍平已吹入实例，兜底回主条目/默认）：字号按本宠物尺寸算（resolveFontPx），
@@ -228,11 +230,20 @@ class PetSprite {
     this.lyric.setAttribute('aria-hidden', 'true');
     this.lyricText = '';
 
+    // 【汐儿 · 11-16 m21310】状态提示气泡：竖排小胶囊，任务类常驻、事件类短时。
+    //   与 say（头顶气泡）、lyric（脚边歌词）三条通道互不抢占。
+    //   数据来源：/state 的 pets.<id>.hint = { items: [{ id, text, kind }] }
+    this.hint = document.createElement('div');
+    this.hint.className = 'pet-hint';
+    this.hint.setAttribute('aria-hidden', 'true');
+    this.hintRows = new Map();
+
     stage.appendChild(this.videoA);
     stage.appendChild(this.videoB);
     stage.appendChild(this.hit);
     this.el.appendChild(this.bubble);
     this.el.appendChild(this.lyric);
+    this.el.appendChild(this.hint);
     this.el.appendChild(this.tip);
     this.el.appendChild(stage);
     rootEl.appendChild(this.el);
@@ -1634,6 +1645,22 @@ class PetSprite {
     return { x: vx0 - winX, y: vy0 - winY, w, h };
   }
 
+  /** 读一次「置顶」的真实状态（同上：读不到就按缓存值显示）。 */
+  syncTopmost() {
+    try {
+      if (!window.petBridge || typeof window.petBridge.getTopmost !== 'function') return;
+      Promise.resolve(window.petBridge.getTopmost())
+        .then((v) => {
+          this.topmostOn = !!v;
+        })
+        .catch(() => {
+          /* 读不到就保持旧值 */
+        });
+    } catch (e) {
+      /* 读失败不影响菜单弹出 */
+    }
+  }
+
   /** 读一次「避免误触」的真实状态（只能在这里读：preload 没就绪时整段跳过，菜单按缓存值显示）。 */
   syncClickThrough() {
     try {
@@ -1657,33 +1684,43 @@ class PetSprite {
     this.stopThrow(); // 菜单弹出前停住飞行中的宠物
     this.stopMove(); // 菜单悬停期间宠物不漫游
     this.syncClickThrough(); // 托盘那边也能勾，每次开菜单读一次真实状态（异步，这一拍先用缓存值）
-    // 桌面专属根项（看一眼 / 陪伴 / 查看余额 / 碎碎念 / 对话）+ 重载配置 + 共享菜单树（动作→分类→具体动画）+ 「更多」（显示位置在里面）
+    this.syncTopmost(); // 同上：置顶开关的真值在 main 进程
+    // 桌面专属根项（状态 / 看一眼 / 陪伴 / 碎碎念 / 对话）+ 重载配置 + 共享菜单树（动作→分类→具体动画）+ 「更多」（显示位置在里面）
     // 碎碎念/对话项无条件显示：手动触发不受 whisperEnabled 限制（该字段只影响自动周期轮询）
     // 10-29 哥哥定：删掉「打开软件」这一项（唤 DSH 走 Ctrl+左键），「看一眼」提到一级菜单第一项
-    // 一级「看一眼」= 陪伴插件注册的那一条（label 仍是注册原文，宿主点击/热键认的是它）
-    const lookItem = {
-      label: '看一眼',
-      action: 'third-party',
-      owner: '本鱼陪伴',
-      send: '陪伴：看一眼',
-    };
+    // 11-09 晚哥哥定：一级「看一眼」**不再写死**，改由宿主注册成「看一眼」分支
+    // （子项：现在看一眼 / 自定义时间… / 关掉），壳只负责摆位置。
     // 【10-31 哥哥定的一级排版】状态* / 看一眼 / 陪伴* / 对话 / 碎碎念* / 重载配置 / 点击穿透 / 动作 / 更多*
     // 分支内容由宿主注册（`petMenuLabels`），这里只按名字取出、按顺序摆位置：
     // 不在这里写死子项——档位/后端循环都归宿主，壳只负责"摆哪一层"。
     const petTree = S.buildPetMenuTree(this.menuItems);
+    // 11-09 晚：一级分支标题带状态（`一眼看 · 开 2 分钟`），按「名字 + 空格」前缀取，
+    // 不能再用字面相等，否则整层从菜单里消失。
     const takeBranch = (name) => {
-      const index = petTree.findIndex((n) => n.label === name && Array.isArray(n.children));
+      const index = petTree.findIndex(
+        (n) => Array.isArray(n.children) && (n.label === name || String(n.label).startsWith(name + ' ')),
+      );
       return index < 0 ? null : petTree.splice(index, 1)[0];
     };
     const statusBranch = takeBranch('状态');
+    const lookBranch = takeBranch('看一眼');
     const companionBranch = takeBranch('陪伴');
     const whisperBranch = takeBranch('碎碎念');
     // 「更多」里只剩维护项：开关（原「显示位置」）+ 回到初始位置 + 第三方项（设置…）
-    const displaySwitch = S.displayMenuBranch();
-    if (displaySwitch) displaySwitch.label = '开关';
+    // 11-09 晚 m16273（哥哥）：独立窗口只有「显示在桌面 / 收起来」两种真有效
+    // （仅网页、两者对独立小窗没区别），四个选项缩成一条开关。
+    // 收起来之后能从托盘图标那一栏叫回来（main.js 的 trayTemplate 每只宠物一个勾）。
+    const shownOnDesktop =
+      this.pet?.display === undefined || this.pet?.display === 'desktop' || this.pet?.display === 'both';
     const more = S.buildMoreBranch(this.menuItems, [
-      ...(displaySwitch ? [displaySwitch] : []),
+      shownOnDesktop
+        ? { label: '✓ 显示在桌面（点一下收起来）', action: 'set-display', display: 'none' }
+        : { label: '显示在桌面（点一下叫她出来）', action: 'set-display', display: 'desktop' },
       { label: '回到初始位置', action: 'home' },
+      // 【本鱼 · 11-09 晚 m17114 哥哥】置顶放进「更多」：默认一直置顶，被最大化的窗口挡住时也能点回来。
+      this.topmostOn
+        ? { label: '✓ 一直置顶（点一下不再盖住别的窗口）', action: 'set-topmost' }
+        : { label: '一直置顶（点一下叫她冒到最上面）', action: 'set-topmost' },
     ]);
     // 「点击穿透」（原「避免误触」）提到一级：它一开身体就点不到了，属于容易找不到的功能，
     // 藏在「更多」里等于没有（哥哥 10-31 定）。
@@ -1691,7 +1728,7 @@ class PetSprite {
     // 顺序：状态 → 看一眼 → 陪伴 → 对话 → 碎碎念 → （其它第三方层）→ 重载配置 → 点击穿透 → 动作 → 更多
     const tree = [
       ...(statusBranch ? [statusBranch] : []),
-      lookItem,
+      ...(lookBranch ? [lookBranch] : []),
       ...(companionBranch ? [companionBranch] : []),
       { label: '对话', action: 'chat' },
       ...(whisperBranch ? [whisperBranch] : []),
@@ -1763,6 +1800,15 @@ class PetSprite {
       this.clickThroughOn = next;
       if (window.petBridge && typeof window.petBridge.setClickThrough === 'function') {
         window.petBridge.setClickThrough(next);
+      }
+      return;
+    }
+    if (leaf.action === 'set-topmost') {
+      // 置顶开关：状态真值在 main 进程（pet:topmost），这里只翻转缓存并让它立刻生效。
+      const next = !this.topmostOn;
+      this.topmostOn = next;
+      if (window.petBridge && typeof window.petBridge.setTopmost === 'function') {
+        window.petBridge.setTopmost(next);
       }
       return;
     }
@@ -1943,6 +1989,67 @@ class PetSprite {
     this.lyric.textContent = next;
     this.lyric.classList.toggle('is-instrumental', !!instrumental);
     this.lyric.classList.add('is-on');
+  }
+
+  // ═══════════════════════════════════════════════════════════════════════
+  // 【汐儿 · 11-16 m21310】状态提示气泡（hint 通道）
+  //   setHint([{ id: 'watch', text: '【在看】', kind: 'task' }, ...])
+  //   - 按 id 做增删改，已有行不重建（只改文字），这样「实时增减」不闪
+  //   - 最多显示 4 行，多的丢掉最老的（宿主侧也会控制条数）
+  //   - 传空数组 = 全部淡出
+  // ═══════════════════════════════════════════════════════════════════════
+  setHint(items, style) {
+    if (!this.hint) return;
+    const list = Array.isArray(items) ? items : [];
+    // 【汐儿 · 11-16 m21833】位置与字号：默认贴在身体右侧偏上（按 --pet-size 算，跟窗口宽度无关），
+    // 设置页拖出来的 offset 直接叠上去。
+    const size = Number(this.size) || 462;
+    const offset = style && typeof style === 'object' ? style.offset || {} : {};
+    const dx = Number(offset.x) || 0;
+    const dy = Number(offset.y) || 0;
+    const fontPx = Math.min(22, Math.max(10, Number(style && style.size) || 15));
+    this.hint.style.left = Math.round(size * 0.78 + dx) + 'px';
+    this.hint.style.top = Math.round(size * 0.2 + dy) + 'px';
+    this.hint.style.setProperty('--hint-font', fontPx + 'px');
+    const seen = new Set();
+    for (const item of list) {
+      if (!item || typeof item !== 'object') continue;
+      const id = String(item.id ?? '').trim();
+      const text = String(item.text ?? '').trim();
+      if (!id || !text) continue;
+      seen.add(id);
+      let row = this.hintRows.get(id);
+      if (!row) {
+        row = document.createElement('div');
+        row.className = 'pet-hint-item';
+        this.hint.appendChild(row);
+        this.hintRows.set(id, row);
+        // 下一帧再打开，让 0.12s 的淡入真的看得见
+        const el = row;
+        window.requestAnimationFrame(() => el.classList.add('is-on'));
+      }
+      if (row.textContent !== text) row.textContent = text;
+      row.classList.toggle('is-event', item.kind === 'event');
+    }
+    for (const [id, row] of Array.from(this.hintRows.entries())) {
+      if (seen.has(id)) continue;
+      this.hintRows.delete(id);
+      row.classList.remove('is-on');
+      window.setTimeout(() => {
+        if (row.parentNode) row.parentNode.removeChild(row);
+      }, 200);
+    }
+    // 超过 4 行：从最老的开始收
+    const rows = Array.from(this.hintRows.entries());
+    if (rows.length > 4) {
+      for (const [id, row] of rows.slice(0, rows.length - 4)) {
+        this.hintRows.delete(id);
+        row.classList.remove('is-on');
+        window.setTimeout(() => {
+          if (row.parentNode) row.parentNode.removeChild(row);
+        }, 200);
+      }
+    }
   }
 
   renderBubble() {

@@ -33,6 +33,11 @@ const CONFIG_PATH = path.join(os.homedir(), '.dsh', 'pet-bridge.json')
 const INSTANCE = Symbol('body-of-fish-bridge.instance')
 const ACTIVE_INSTANCE = Symbol.for('body-of-fish-bridge.active-instance')
 globalThis[ACTIVE_INSTANCE] = INSTANCE
+/**
+ * 【本鱼 · 11-05】钩子只留「最后一次求值的实例」在岗（否则刷新后新旧两份会各投一次）。
+ * 多工作区之所以还能通：`agents.list()` 是**全机**的会话表，这一份实例把所有工作区的会话都挂上了，
+ * 配置里点名哪个会话都能投到 —— 前提是配置别是陈的（见下面的 refreshConfig）。
+ */
 const isActiveInstance = () => globalThis[ACTIVE_INSTANCE] === INSTANCE
 
 /** 桌宠运行时文件：优先新数据目录，其次 0.3.x 的老目录（升级用户还没迁移时也能连上） */
@@ -208,8 +213,29 @@ function sessionLabel(s) {
   return `${base.slice(0, 10)}·${tail}`
 }
 
+function configStampOf() {
+  try {
+    const st = fs.statSync(CONFIG_PATH)
+    return `${st.mtimeMs}:${st.size}`
+  } catch {
+    return ''
+  }
+}
+
 export function apply(ctx) {
   let config = loadConfig()
+  /**
+   * 【本鱼 · 11-05】配置文件是**全机一份**，但每个工作区各有一份插件实例，各自在启动时读一次。
+   * 别的窗口 / 设置页改了文件，这边内存里还是老值 —— 于是「文件写 AGI、运行态盯 AI」。
+   * 每个钩子和每次发布前比一次 mtime，变了就重读。
+   */
+  let configStamp = configStampOf()
+  function refreshConfig() {
+    const stamp = configStampOf()
+    if (stamp === '' || stamp === configStamp) return
+    configStamp = stamp
+    config = loadConfig()
+  }
   const mounted = new Set()
   const looked = new Set()
   /** 最近一次注入/识图的结果，给 /state 和设置页看 */
@@ -276,6 +302,7 @@ export function apply(ctx) {
    */
   let baseUrlCache = ''
   function publishDiscovery(baseUrl) {
+    refreshConfig()
     if (baseUrl !== '') baseUrlCache = baseUrl
     if (baseUrlCache === '') return
     try {
@@ -283,6 +310,9 @@ export function apply(ctx) {
       const sessions = listSessions().map((s) => ({ id: s.id, title: s.title, cwd: s.cwd, status: s.status }))
       const hit = pickAgent()
       const selected = hit ? String(sessionOf(hit)?.id ?? '') : ''
+      // 【本鱼 · 11-05】谁的会话由谁发布：不是本实例挂着的会话就别写这个文件，
+      // 免得「端口是 A 窗口、会话是 B 窗口」——桌宠连过去永远对不上。
+      if (selected === '' || !mounted.has(selected) || !isActiveInstance()) return
       const selectedTitle = sessionLabel(sessions.find((s) => s.id === selected))
       writeJsonAtomic(file, {
         url: baseUrlCache,
@@ -367,21 +397,92 @@ export function apply(ctx) {
   }
 
   /** 读桌宠运行态：端口会漂（3080 起最多扫 25 个），每次现读。 */
-  function petRuntime() {
-    const raw = readJson(config.petRuntimeFile, null)
+  function petRuntime(file = config.petRuntimeFile) {
+    const raw = readJson(file, null)
     const port = Number(raw?.port)
     if (!Number.isFinite(port) || port <= 0) return null
-    return { port: Math.trunc(port), token: String(raw?.token ?? ''), pid: raw?.pid ?? null }
+    return { port: Math.trunc(port), token: String(raw?.token ?? ''), pid: raw?.pid ?? null, file }
+  }
+
+  /**
+   * 【本鱼 · 11-15】运行时文件候选：配置里那份优先，再试新数据目录、老目录。
+   *
+   * 为什么：外部用户报 403「请从桌面菜单重新打开设置」，头里用的就是文件里的 token。
+   * 最常见的两种现场是 ①配置还指着 0.3.x 的老文件（token 陈了）②同时跑过两个身体实例，
+   * 后开的把文件写成自己的 token、端口却是先开的那个在听。多试一份、并留日志，就不用猜了。
+   */
+  function runtimeCandidates() {
+    const list = []
+    const push = (item) => {
+      try {
+        if (typeof item === 'string' && item !== '' && !list.includes(item)) list.push(item)
+      } catch {
+        /* 拼路径失败就当没有 */
+      }
+    }
+    push(config.petRuntimeFile)
+    const home = os.homedir()
+    push(path.join(home, '.dsh', 'body-of-fish', 'standalone-runtime.json'))
+    push(path.join(home, '.dsh', 'dsh-pet', 'standalone-runtime.json'))
+    return list
+  }
+
+  /** 桥自己的 HTTP 流水：403 这类「只看见一句拒绝」的现场，全靠这里。 */
+  function httpLog(line) {
+    try {
+      const dir = bridgeLogDir()
+      fs.mkdirSync(dir, { recursive: true })
+      fs.appendFileSync(path.join(dir, 'bridge-http.log'), `${new Date().toISOString()} ${line}\n`)
+    } catch {
+      /* 日志写不进去不能影响投递 */
+    }
+  }
+
+  function replyText(res) {
+    const body = res.json && typeof res.json === 'object' ? res.json : null
+    const message = body ? body.error ?? body.reason ?? body.message : null
+    if (typeof message === 'string' && message !== '') return message
+    return String(res.text ?? '').replace(/\s+/g, ' ').trim().slice(0, 160)
   }
 
   async function petPost(route, payload, timeoutMs) {
-    const runtime = petRuntime()
-    if (runtime === null) throw new Error(`读不到桌宠运行态：${config.petRuntimeFile}`)
-    const res = await postJson(runtime.port, route, payload, runtime.token, timeoutMs)
-    if (res.status === 404) throw new Error('桌宠这个版本还没有这个端点（要 0.3.9）')
-    if (res.status >= 400) throw new Error(`桌宠返回 ${res.status}`)
-    if (res.json && res.json.ok === false) throw new Error(`桌宠拒绝：${res.json.error ?? res.json.reason ?? '未知'}`)
-    return res.json
+    let lastError = null
+    for (const file of runtimeCandidates()) {
+      const runtime = petRuntime(file)
+      if (runtime === null) continue
+      let res
+      try {
+        res = await postJson(runtime.port, route, payload, runtime.token, timeoutMs)
+      } catch (error) {
+        lastError = error
+        httpLog(`${route} 连不上 port=${runtime.port} pid=${runtime.pid ?? '-'} file=${file} err=${error.message}`)
+        continue
+      }
+      if (res.status === 403) {
+        // 换下一份运行时文件再试；都 403 就把「哪份文件、token 多长」写下来
+        lastError = new Error(`桌宠拒绝（403）：${replyText(res)}`)
+        httpLog(
+          `${route} 403 file=${file} port=${runtime.port} pid=${runtime.pid ?? '-'} ` +
+            `tokenLen=${runtime.token.length} reason=${res.json?.reason ?? '-'} body=${replyText(res)}`,
+        )
+        continue
+      }
+      if (res.status === 404) {
+        lastError = new Error('桌宠这个版本还没有这个端点（要 0.3.9）')
+        continue
+      }
+      if (res.status >= 400) {
+        lastError = new Error(`桌宠返回 ${res.status}：${replyText(res)}`)
+        httpLog(`${route} status=${res.status} file=${file} body=${replyText(res)}`)
+        throw lastError
+      }
+      if (res.json && res.json.ok === false) throw new Error(`桌宠拒绝：${res.json.error ?? res.json.reason ?? '未知'}`)
+      if (file !== config.petRuntimeFile) {
+        httpLog(`${route} 用上了备用运行时文件 file=${file}（配置里是 ${config.petRuntimeFile}）`)
+      }
+      return res.json
+    }
+    throw lastError ?? new Error(`读不到桌宠运行态：${config.petRuntimeFile}`)
   }
 
   /** 【本鱼 · 11-01】摘要调试：把送进 /summarize 的原文长度和首尾写进日志，定位「只总结前半段」。 */
@@ -533,6 +634,7 @@ export function apply(ctx) {
     mounted.add(sid)
     try {
       bus.on('agent/inbox/inserted', (payload) => {
+        refreshConfig()
         if (!isActiveInstance()) return // 旧实例退场（同 turn-stopping）
         const message = (payload && payload.message) || payload
         if (!config.enabled) return
@@ -557,6 +659,7 @@ export function apply(ctx) {
     // 两条路都可能命中，靠 `looked` 按 attachmentId 去重，不会看两遍。
     try {
       bus.on('session/event', (subject, event) => {
+        refreshConfig()
         if (!isActiveInstance()) return // 旧实例（刷新前）自己退场，别再重复投递
         if (!config.enabled || !config.lookImages) return
         if (!event || event.type !== 'user/message') return
@@ -580,6 +683,7 @@ export function apply(ctx) {
     }
     try {
       bus.on('agent/turn-stopping', () => {
+        refreshConfig()
         if (!isActiveInstance()) return // 同上：刷新后旧实例的钩子不许再送一遍
         if (!config.enabled || (!config.bubbleReply && !config.speakReply)) return
         // 【本鱼 · 11-02】只跟「接入的那个会话」，别的会话（QQ 群、隔壁仓）一律不碰。
@@ -708,6 +812,7 @@ export function apply(ctx) {
       else publishDiscovery(guessBaseUrl())
       try {
         if (route === '/state' && req.method === 'GET') {
+          refreshConfig()
           const runtime = petRuntime()
           return json(res, 200, {
             enabled: config.enabled,

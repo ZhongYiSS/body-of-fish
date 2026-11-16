@@ -83,7 +83,7 @@ export interface StandaloneModelService {
   isReady(): boolean;
   canWhisper(): boolean;
   /** 看图/声音选「云端」时复用的连接三件套（只在进程内传给宿主，不进页面） */
-  connection(): { baseUrl: string; model: string; apiKey: string };
+  connection(): { baseUrl: string; model: string; apiKey: string; extraHeaders: Record<string, string> };
   getSettings(): { whisperIntervalSec: number };
   dispose(): void;
 }

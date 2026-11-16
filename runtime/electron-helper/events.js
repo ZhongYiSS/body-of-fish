@@ -389,6 +389,21 @@ function applyLyricLeaf(petId, leaf) {
   }
 }
 
+/** 【汐儿 · 11-16 m21310】状态提示气泡 → 竖排小胶囊。
+ *  数据形状：{ items: [{ id, text, kind: 'task'|'event', ttlMs, at }] }
+ *  items 为空 = 全部淡出。与 say / lyric 完全无关，所以对话、歌词、状态提示可以同时出现。
+ *  petId 由路径解析出来（pets.<id>.hint）；本窗口只装一只宠物，按 id 命中即可。 */
+function applyHintLeaf(petId, leaf) {
+  const data = leaf ? leaf.data : null;
+  if (!data || typeof data !== 'object') return;
+  const items = Array.isArray(data.items) ? data.items : [];
+  const style = { offset: data.offset, size: data.size };
+  for (const s of sprites) {
+    if (s.pet.id !== petId) continue;
+    if (typeof s.setHint === 'function') s.setHint(items, style);
+  }
+}
+
 /** 位置指令叶子 → 对应宠物挪过去（其他插件经 POST /position 写进 S）。
  *  复用 sprite.moveToCenter（instant / spring / line 三条路都在那儿），与 /anim 同一族：只分发，
  *  不重写运动学。petId 由路径解析出来（pets.<id>.position）；本窗口只装一只宠物，按 id 命中即可。 */
@@ -467,6 +482,9 @@ async function pollStateOnce() {
       } else if (change.path.startsWith('pets.') && change.path.endsWith('.lyric')) {
         // 【本鱼改造 · 歌词气泡】独立叶子，不跟 say 抢：宿主/插件写入 pets.<id>.lyric
         applyLyricLeaf(change.path.slice('pets.'.length, -'.lyric'.length), change.leaf);
+      } else if (change.path.startsWith('pets.') && change.path.endsWith('.hint')) {
+        // 【汐儿 · 11-16 m21310】状态提示：任务类常驻（在看/在想），事件类短时
+        applyHintLeaf(change.path.slice('pets.'.length, -'.hint'.length), change.leaf);
       } else if (change.path.startsWith('pets.') && change.path.endsWith('.lock')) {
         // 占用锁：同上切片，绝不 split('.')。它是**状态**不是指令（见 applyLockLeaf）
         applyLockLeaf(change.path.slice('pets.'.length, -'.lock'.length), change.leaf);

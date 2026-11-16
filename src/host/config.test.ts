@@ -1081,3 +1081,160 @@ describe('sliceMemoryRounds —— chatMemoryRounds=0 必须真正不带历史�
     assert.deepEqual(sliceMemoryRounds([], 0), []);
   });
 });
+
+
+describe('watch 段（陪伴节奏 / 是否出声）—— 用户层写了就要读回来', () => {
+  test('合法 pace + speak 原样带到成品配置（哥哥 11-09 报「出声关不掉」）', () => {
+    const paths = withBase({}, { watch: { pace: 'calm', speak: true } });
+    const conf = readAllConfig(paths).main;
+    assert.deepEqual(conf.watch, { pace: 'calm', speak: true });
+  });
+
+  test('只写 speak 也行（pace 缺失 = 消费端自己兜底 normal）', () => {
+    const paths = withBase({}, { watch: { speak: false } });
+    assert.deepEqual(readAllConfig(paths).main.watch, { speak: false });
+  });
+
+  test('watch.autoStart：开机自恢复标记读得回来，非法值丢掉', () => {
+    const on = withBase({}, { watch: { autoStart: true, pace: 'dense' } });
+    assert.deepEqual(readAllConfig(on).main.watch, { pace: 'dense', autoStart: true });
+    const bad = withBase({}, { watch: { autoStart: '是' } });
+    assert.equal('watch' in readAllConfig(bad).main, false);
+  });
+
+  test('没写 watch → 成品里没有这个键（不凭空造默认）', () => {
+    const paths = withBase({}, { notificationsEnabled: true });
+    assert.equal('watch' in readAllConfig(paths).main, false);
+  });
+
+  test('非法 pace 被丢掉、合法的 speak 保留', () => {
+    const paths = withBase({}, { watch: { pace: '狂躁', speak: true } });
+    assert.deepEqual(readAllConfig(paths).main.watch, { speak: true });
+  });
+
+  test('watch 写成非对象 → 整段忽略，其余字段照常', () => {
+    const paths = withBase({}, { watch: '开', notificationsEnabled: false });
+    const conf = readAllConfig(paths).main;
+    assert.equal('watch' in conf, false);
+    assert.equal(conf.notificationsEnabled, false);
+  });
+
+  test('存设置页时 watch 被透传保留（saveUserConfig 不认识它，但不许丢）', () => {
+    const existing = { pets: BASE.pets, watch: { pace: 'dense', speak: true } };
+    const saved = saveUserConfig(
+      { pets: BASE.pets, notificationsEnabled: true },
+      existing as Record<string, unknown>,
+    );
+    assert.deepEqual((saved as Record<string, unknown>).watch, { pace: 'dense', speak: true });
+  });
+
+  test('watch.tuning / prompt / talkGapSec：设置页写进来的都读得回（哥哥 m18312）', () => {
+    const paths = withBase({}, {
+      watch: {
+        pace: 'dense',
+        tuning: { cutAbs: 40, paces: { dense: { integralSec: 6 } } },
+        prompt: '照这个说：{{brief}}',
+        talkGapSec: 20,
+        fallbackSec: 120,
+      },
+    });
+    const conf = readAllConfig(paths).main.watch as Record<string, unknown>;
+    assert.equal(conf.pace, 'dense');
+    assert.deepEqual(conf.tuning, { cutAbs: 40, paces: { dense: { integralSec: 6 } } });
+    assert.equal(conf.prompt, '照这个说：{{brief}}');
+    assert.equal(conf.talkGapSec, 20);
+    assert.equal(conf.fallbackSec, 120);
+  });
+
+  test('四套提示词（游戏 / 视频 / 网页 / 聊天）都过白名单，坏值各自丢掉（哥哥 m19324）', () => {
+    const paths = withBase({}, {
+      watch: {
+        prompt: '游戏那份',
+        promptVideo: '视频那份',
+        promptWeb: '网页那份',
+        promptChat: '聊天那份',
+      },
+    });
+    const conf = readAllConfig(paths).main.watch as Record<string, unknown>;
+    assert.equal(conf.prompt, '游戏那份');
+    assert.equal(conf.promptVideo, '视频那份');
+    assert.equal(conf.promptWeb, '网页那份');
+    assert.equal(conf.promptChat, '聊天那份');
+
+    const bad = withBase({}, { watch: { promptVideo: 42, promptWeb: null, promptChat: { a: 1 } } });
+    const badConf = readAllConfig(bad).main.watch as Record<string, unknown> | undefined;
+    assert.equal(badConf?.promptVideo, undefined);
+    assert.equal(badConf?.promptChat, undefined);
+  });
+
+  test('watch.tuning 非法值不炸：配置层原样收着，normalizeTuning 负责夹（坏 prompt 直接丢）', () => {    const paths = withBase({}, { watch: { tuning: { cutAbs: '高', paces: '三档' }, prompt: 42 } });
+    const conf = readAllConfig(paths).main.watch as Record<string, unknown> | undefined;
+    assert.equal(conf?.prompt, undefined);
+    // 对象形状不对也照收，消费端 normalizeTuning 会退回默认
+    assert.deepEqual(conf?.tuning, { cutAbs: '高', paces: '三档' });
+  });
+
+  test('watch.tuning 不是对象时整段忽略，pace 照常', () => {
+    const paths = withBase({}, { watch: { pace: 'calm', tuning: '大点' } });
+    assert.deepEqual(readAllConfig(paths).main.watch, { pace: 'calm' });
+  });
+});
+// 【汐儿 · 11-11 m19834】subtitle 段：只认 sessData 一个字符串键，坏值丢掉
+test('B站 SESSDATA：subtitle 段过白名单，坏值丢掉', () => {
+  const ok = readAllConfig(withBase({}, { subtitle: { sessData: '  SESSDATA=abc  ' } }));
+  assert.deepEqual(ok.main.subtitle, { sessData: 'SESSDATA=abc' });
+
+  const empty = readAllConfig(withBase({}));
+  assert.equal(empty.main.subtitle, undefined);
+
+  const bad = readAllConfig(withBase({}, { subtitle: { sessData: 42 } }));
+  assert.equal(bad.main.subtitle, undefined);
+});
+
+// 【汐儿 · 11-15】voice 段：只认 0~100 的整数音量，坏值丢掉（默认不出现 = 100）
+test('提示气泡：hint.x/y/size 过白名单，越界丢掉', () => {
+  const ok = readAllConfig(withBase({}, { hint: { x: -120, y: 40, size: 16 } })).main.hint;
+  assert.deepEqual(ok, { x: -120, y: 40, size: 16 });
+  const bad = readAllConfig(withBase({}, { hint: { x: 900, y: 'left', size: 40 } })).main.hint;
+  assert.equal(bad, undefined);
+});
+
+test('播放音量：voice.volume 过白名单，坏值丢掉', () => {
+  const ok = readAllConfig(withBase({}, { voice: { volume: 60.4 } }));
+  assert.deepEqual(ok.main.voice, { volume: 60 });
+
+  const dflt = readAllConfig(withBase({}));
+  assert.equal(dflt.main.voice, undefined);
+
+  const tooLoud = readAllConfig(withBase({}, { voice: { volume: 140 } }));
+  assert.equal(tooLoud.main.voice, undefined);
+
+  const bad = readAllConfig(withBase({}, { voice: { volume: 'loud' } }));
+  assert.equal(bad.main.voice, undefined);
+});
+
+// 【汐儿 · 11-11 m20199】search 段：只认 enabled 一个布尔键，默认不出现（= 开）
+test('联网查开关：search.enabled 过白名单，坏值丢掉', () => {
+  const off = readAllConfig(withBase({}, { search: { enabled: false } }));
+  assert.deepEqual(off.main.search, { enabled: false });
+
+  const dflt = readAllConfig(withBase({}));
+  assert.equal(dflt.main.search, undefined);
+
+  const bad = readAllConfig(withBase({}, { search: { enabled: '关' } }));
+  assert.equal(bad.main.search, undefined);
+});
+
+test('排队过期与句子间隔：voice.staleSec / voice.gapMs 过白名单，坏值丢掉', () => {
+  const ok = readAllConfig(withBase({}, { voice: { staleSec: 20.6, gapMs: 500 } }));
+  assert.deepEqual(ok.main.voice, { staleSec: 21, gapMs: 500 });
+
+  const zero = readAllConfig(withBase({}, { voice: { gapMs: 0 } }));
+  assert.deepEqual(zero.main.voice, { gapMs: 0 });
+
+  const bad = readAllConfig(withBase({}, { voice: { staleSec: 0, gapMs: 9_000 } }));
+  assert.equal(bad.main.voice, undefined);
+
+  const junk = readAllConfig(withBase({}, { voice: { staleSec: 'fast', gapMs: null } }));
+  assert.equal(junk.main.voice, undefined);
+});

@@ -160,7 +160,9 @@ export function createPetServices(deps: PetServicesDeps): PetServices {
         }
         if (bytes.byteLength === 0) throw new ServiceError('bad-request', '图片是空的');
         try {
-          const text = await deps.gateway.vision(bytes, request.prompt ?? '看图说一句，20 字以内。');
+          const text = await deps.gateway.vision(bytes, request.prompt ?? '看图说一句，20 字以内。', {
+            onDelta: request.onDelta,
+          });
           return { text, backend: 'remote' };
         } catch (error) {
           throw new ServiceError('failed', error instanceof Error ? error.message : String(error));

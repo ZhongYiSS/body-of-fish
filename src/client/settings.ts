@@ -435,7 +435,7 @@ export const zh = {
   featCompanion: '陪伴模式',
   featLyric: '歌词气泡',
   featChatterHint: '旁听：你干活时她偶尔接一句（在下面「旁听与陪伴」保存后生效）',
-  featCompanionHint: '陪伴：隔一会儿截屏看一眼，变化了就说一句（识图/出声按模型设置走）',
+  featCompanionHint: '看一眼：隔一会儿截屏看一眼，变化了就说一句（识图/出声按模型设置走）',
   featLyricHint: '歌词：读本机播放器，把正在放的那句写进气泡',
   featOn: '开着',
   featOff: '关着',

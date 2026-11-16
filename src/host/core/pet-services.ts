@@ -71,6 +71,8 @@ export interface EyeRequest {
   image: string | Uint8Array;
   /** 想让它看什么；不填用默认提示词 */
   prompt?: string;
+  /** 流式：每吐一段就回调一次（游戏陪伴靠它提前开口，见 game-talk.ts） */
+  onDelta?: (chunk: string) => void;
 }
 
 export interface EyeResult {

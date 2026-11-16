@@ -12,23 +12,33 @@
  *
  * 哥哥 10-31 定的层级（壳侧按这里的前缀顺序摆位置）：
  *   一级：状态* / 看一眼 / 陪伴* / 对话 / 碎碎念* / 重载配置 / 点击穿透 / 动作 / 更多*
- *   状态二级：陪伴（开关） / 嗓子（本地→云→关 循环） / 眼睛（同上） / 歌词（开关）
- *   陪伴二级：四档时间 + 关陪伴
+ *   状态二级：嗓子（本地→云→关 循环） / 眼睛（同上） / 歌词（开关） / 接入
+ *   看一眼二级：开关 + 现在看一眼 + 自定义时间…
+ *   陪伴二级：开关 + 三档节奏 + 出声
  *   碎碎念二级：自动开/关 + 四档时间 + 打开池子 + 自定义间隔…
  *
  * 约束（`src/host/menu.ts`）：label ≤ 32 字符、同 owner ≤ 20 项、同 owner 内不可重复。
  * 当前最多 12 项、最长 14 字，都留有余量。
  */
 
+import { watchPaceCost, type WatchPace } from './watch-mode';
+import { WATCH_MODES, watchModeWord, type WatchMode } from './screen-target';
+
 /** 壳侧认的 owner（`shared-core.js` 的 `COMPANION_OWNER = "本鱼陪伴"`），不可改 */
 export const PET_MENU_OWNER = '本鱼陪伴';
 
 /** 分组前缀：状态那一层 */
 export const STATE_PREFIX = '状态：';
-/** 分组前缀：陪伴档位那一层 */
-export const COMPANION_PREFIX = '陪伴：';
+/** 分组前缀：看一眼档位那一层（11-09 哥哥改名：原来的「陪伴」= 定时截一张，改名「看一眼」） */
+export const COMPANION_PREFIX = '看一眼：';
 /** 分组前缀：碎碎念那一层 */
 export const WHISPER_PREFIX = '碎碎念：';
+
+/** 分组前缀：陪伴（看护）那一层（本鱼 · 11-09：常驻看屏幕、只在真的变了时出图）。
+ *  11-09 哥哥改名：这一层挪上来叫「陪伴」，原来那个定时截一张的改叫「看一眼」。 */
+export const WATCH_PREFIX = '陪伴：';
+/** 旧前缀：改名后的兼容解析（菜单整体覆盖，旧标签最多存活一拍，认一下不花什么） */
+const LEGACY_WATCH_PREFIX = '看护：';
 
 /** 陪伴档位：菜单里给的四个间隔（原插件 MENU_SPEC 同款，去掉「关」——关是状态里那项） */
 export const COMPANION_INTERVALS: ReadonlyArray<{ readonly label: string; readonly ms: number }> = [
@@ -65,8 +75,10 @@ export interface PetMenuState {
   companionRunning: boolean;
   /** 陪伴当前间隔（毫秒）；跑着时用来显示「开 2 分钟」 */
   companionIntervalMs: number;
-  /** 歌词气泡是否在跑 */
+  /** 联网查资料的总开关（默认开） */
   lyricRunning: boolean;
+  /** 联网查资料的总开关（默认开；只有显式关才是 false） */
+  searchEnabled?: boolean;
   /** 看图当前后端（眼睛那一项要显示 关/本地/云） */
   vision?: BackendWord;
   /** 声音当前后端（嗓子那一项要显示 关/本地/云） */
@@ -87,6 +99,15 @@ export interface PetMenuState {
     title: string;
     /** 当前对准的会话名（只用来显示；选会话走网页，不塞进菜单了） */
     selectedTitle?: string;
+  };
+  /** 看护模式（本鱼 · 11-09）：常驻看屏幕，只在画面真变了时拼 4 帧出一句 */
+  watch?: {
+    running: boolean;
+    pace: WatchPace;
+    /** 陪伴要不要出声（哥哥 11-09 晚：单独一个开关，默认关） */
+    speak?: boolean;
+    /** 三个模式：自动检测 / 游戏 / 视频（哥哥 11-11 m19041） */
+    mode?: WatchMode;
   };
 }
 
@@ -128,14 +149,33 @@ export function petStatusText(facts: {
   lyricRunning: boolean;
   vision: BackendWord;
   voice: BackendWord;
+  /** 看护模式（11-09 起）：没传就当没这功能，旧调用方不用改 */
+  watchRunning?: boolean;
+  watchPace?: WatchPace;
+  /** 陪伴出不出声（11-09 晚加） */
+  watchSpeak?: boolean;
+  /** 三个模式；auto 不写进状态行（省字数） */
+  watchMode?: WatchMode;
 }): string {
   const companion = facts.companionRunning ? `开 ${shortTier(facts.companionIntervalMs)}` : '关';
+  const modeTail = facts.watchMode !== undefined && facts.watchMode !== 'auto' ? `·${watchModeWord(facts.watchMode)}` : '';
+  const watch = facts.watchRunning
+    ? `开 ${watchPaceWord(facts.watchPace)}${facts.watchSpeak === true ? '·出声' : ''}${modeTail}`
+    : '关';
   return [
-    `陪伴：${companion}`,
+    `陪伴：${watch}`,
+    `看一眼：${companion}`,
     `歌词：${facts.lyricRunning ? '开' : '关'}`,
     `看图：${modeWord(facts.vision)}`,
     `声音：${modeWord(facts.voice)}`,
   ].join('｜');
+}
+
+/** 看护节奏的中文短名（轻 / 正常 / 密） */
+export function watchPaceWord(pace: WatchPace | undefined): string {
+  if (pace === 'calm') return '轻';
+  if (pace === 'dense') return '密';
+  return '正常';
 }
 
 /**
@@ -144,17 +184,22 @@ export function petStatusText(facts: {
  * 注册语义是「整体覆盖」，所以每次都要给全量：菜单项 = 当下的真实能力清单，
  * 不留下已经停掉却还挂着的僵尸项。
  *
- * 「看一眼」必须注册：桌面壳的右键根菜单里写死了一条 `{owner:'本鱼陪伴', send:'陪伴：看一眼'}`
- * （`sprite.js`），宿主没注册这一项的话点了就是 delivered:false —— 点了没反应。
+ * 「看一眼：现在看一眼」必须注册：桌面壳的右键根菜单由 `sprite.js` 自己拼一条
+ * （11-09 晚起发的是 `看一眼：现在看一眼`；更早是 `陪伴：看一眼`），宿主没注册这一项的话
+ * 点了就是 delivered:false —— 点了没反应。
  */
 export function petMenuLabels(state: PetMenuState): string[] {
   const companion = state.companionRunning ? `开 ${shortTier(state.companionIntervalMs)}` : '关';
   const labels: string[] = [
     // 状态那一层（壳按 `状态：` 套成一级分支）
-    `${STATE_PREFIX}陪伴 · ${companion}`,
+    // 【11-09 晚 哥哥 m16044】「陪伴 / 看一眼」的开关挪进各自的一级分支，
+    //   一级分支标题直接写状态（壳按第一个全角冒号切，冒号前那段就是一级文字），
+    //   这样不开状态层就能看见开没开、点一下就能开关。
     `${STATE_PREFIX}嗓子 · ${modeWord(state.voice)}`,
     `${STATE_PREFIX}眼睛 · ${modeWord(state.vision)}`,
     `${STATE_PREFIX}歌词 · ${state.lyricRunning ? '开' : '关'}`,
+    // 【汐儿 · 11-11 m20199】联网查资料：哥哥说放状态子菜单里、默认开
+    `${STATE_PREFIX}联网查 · ${state.searchEnabled === false ? '关' : '开'}`,
     // 接入 DSH（哥哥 11-01：状态层里要有一个「把桌宠接到 DSH」的开关）；
     // 11-01 晚改：会话一多，菜单里一条一个就翻不动了 → 只留「选会话…」（开网页选），
     // 开关标签里带上当前接的那个会话短名，一眼能看出接的是谁。
@@ -174,24 +219,50 @@ export function petMenuLabels(state: PetMenuState): string[] {
           `${STATE_PREFIX}接入 · 选会话…`,
         ]
       : []),
-    // 「看一眼」：桌面壳一级菜单里写死了，这里必须注册，否则点了没反应
-    '陪伴：看一眼',
   ];
-  // 陪伴档位那一层
-  for (const item of COMPANION_INTERVALS) {
-    const active = state.companionRunning && state.companionIntervalMs === item.ms;
-    labels.push(`${COMPANION_PREFIX}${active ? '✓ ' : ''}开 ${item.label}`);
+  // 一眼那一层（哥哥 11-09 晚：时长只要「自定义时间」，不再列 1/2/3/5 分钟）
+  // 11-09 晚 m16044：分支标题带状态，开关就在分支里（第一项），不用再进状态层。
+  // 11-09 晚 m16273：关着的时候一级也要能看见「配的多久看一次」，
+  //   不然一级只写「关」，得进去才知道自己设的是 2 分钟还是 30 秒。
+  const lookTier = shortTier(state.companionIntervalMs);
+  const lookHead = state.companionRunning
+    ? `看一眼 · 开 ${lookTier}`
+    : state.companionIntervalMs > 0
+      ? `看一眼 · 关（${lookTier}）`
+      : '看一眼 · 关';
+  labels.push(`${lookHead}：${state.companionRunning ? '✓ 开着（点一下关）' : '开（点一下开）'}`);
+  labels.push(`${lookHead}：现在看一眼`);
+  labels.push(`${lookHead}：自定义时间…`);
+  // 陪伴那一层（11-09）：三档节奏 + 出声 + 开关（标题带状态，开关在分支第一项）。
+  // 同上：关着也要看见当前档位（哥哥 11-09 晚 m16273）
+  // 【汐儿 · 11-11 m19216】哥哥要的头是「陪伴 · 游戏/视频 · 开/关（正常/密）」——
+  //   模式和档位都摆到一级，一眼就知道她在按哪套规则盯、现在开没开。
+  const watchModeNow: WatchMode = state.watch?.mode ?? 'auto';
+  const watchHead = state.watch
+    ? `陪伴 · ${watchModeWord(watchModeNow)} · ${state.watch.running ? '开' : '关'}（${watchPaceWord(state.watch.pace)}）`
+    : `陪伴 · ${watchModeWord(watchModeNow)} · 关`;
+  labels.push(`${watchHead}：${state.watch?.running ? '✓ 开着（点一下关）' : '开（点一下开）'}`);
+  for (const pace of ['calm', 'normal', 'dense'] as const) {
+    const active = state.watch?.running === true && state.watch.pace === pace;
+    // 11-09 晚：哥哥说「轻/正常/密」看不出账单，标签里带上每分钟最多几张
+    labels.push(`${watchHead}：${active ? '✓ ' : ''}${watchPaceWord(pace)}（${watchPaceCost(pace)}）`);
   }
-  labels.push(`${COMPANION_PREFIX}自定义…`);
-  if (state.companionRunning) labels.push(`${COMPANION_PREFIX}关陪伴`);
+  const watchSpeak = state.watch?.speak === true;
+  // 11-09 晚 m16399：哥哥点了「出声（点一下开）」反而关掉声音——旧文案像「点一下打开」，
+  //   实际是开关。改成把当前状态和点下去的结果都写清楚。
+  labels.push(`${watchHead}：${watchSpeak ? '✓ 会出声（点一下静音）' : '不出声（点一下开）'}`);
+  // 【汐儿 · 11-11 m19041】三个模式：自动检测 / 游戏 / 视频。哥哥原话「这样不容易错」——
+  // 自动认不准时他能手动钉死一个，钉住之后宿主就不再猜了。
+  for (const mode of WATCH_MODES) {
+    const mark = watchModeNow === mode ? '✓ ' : '';
+    labels.push(`${watchHead}：模式 ${mark}${watchModeWord(mode)}`);
+  }
+  labels.push(`${watchHead}：看他看到的（记录目录）…`);
   // 碎碎念那一层：开关只有一项，带 ✓ 的那项就是"关掉它"——菜单里不许有点不动的东西
   // 【11-03 哥哥「30 秒碎碎念疑似没生效」】旧文案「✓ 自动关」读起来像"自动关着"，
   //   明明开着却让人以为没生效。改成「✓ 自动开（点一下关）」——状态和动作都写清楚。
   labels.push(state.whisperEnabled === true ? '碎碎念：✓ 自动开（点一下关）' : '碎碎念：自动关（点一下开）');
-  for (const item of WHISPER_INTERVALS) {
-    // ✓ 只挂在**实际生效**的那一档上；没开自动时也照样显示（调完间隔再开也看得懂）
-    labels.push(`碎碎念：${state.whisperIntervalSec === item.seconds ? '✓ ' : ''}${item.label}`);
-  }
+  // 哥哥 11-09 晚：五档全收进小窗，菜单只留一行「间隔（现在多少秒）…」
   // 池子那一项的说明放在池子文件里（见 openWhisperPool 写示例时的注释）；
   // 菜单只有 32 字，写不下路径，所以这里只留"打开池子"。
   labels.push('碎碎念：打开池子');
@@ -200,8 +271,7 @@ export function petMenuLabels(state: PetMenuState): string[] {
   // 【11-01 哥哥第 2 条】这一项后面要跟上「现在是多少秒」，且当前不是四档之一时打 ✓
   //   —— 否则自定义过的间隔在菜单里看起来像"没设置"。
   const customSec = Number.isFinite(state.whisperIntervalSec) ? Math.round(Number(state.whisperIntervalSec)) : 0;
-  const isPreset = WHISPER_INTERVALS.some((item) => item.seconds === customSec);
-  labels.push(`碎碎念：${isPreset ? '' : '✓ '}自定义（${customSec} 秒）`);
+  labels.push(`碎碎念：间隔（${customSec} 秒）…`);
   return labels;
 }
 
@@ -216,6 +286,8 @@ export type PetMenuAction =
   | { readonly kind: 'lyric-start' }
   | { readonly kind: 'lyric-stop' }
   | { readonly kind: 'lyric-toggle' }
+  /** 状态层第四项：联网查资料（默认开，哥哥 11-11 m20199 放状态子菜单） */
+  | { readonly kind: 'search-toggle' }
   | { readonly kind: 'cycle-vision' }
   | { readonly kind: 'cycle-voice' }
   | { readonly kind: 'whisper-enable' }
@@ -226,18 +298,29 @@ export type PetMenuAction =
   | { readonly kind: 'speak' }
   | { readonly kind: 'dsh-toggle' }
   | { readonly kind: 'dsh-picker' }
-  | { readonly kind: 'dsh-install' };
+  | { readonly kind: 'dsh-install' }
+  | { readonly kind: 'watch-start'; readonly pace: WatchPace }
+  | { readonly kind: 'watch-stop' }
+  | { readonly kind: 'watch-toggle' }
+  | { readonly kind: 'watch-voice-toggle' }
+  /** 三个模式：自动检测 / 游戏 / 视频（哥哥 11-11 m19041） */
+  | { readonly kind: 'watch-mode'; readonly mode: WatchMode }
+  /** 打开陪伴现场记录（jsonl + 拼图），哥哥 11-09 晚要看「她到底看了什么」 */
+  | { readonly kind: 'watch-open-log' };
 
-/** `陪伴：✓ 开 1 分钟` / `陪伴：开 1 分钟` → 档位毫秒数 */
-const COMPANION_START = /^陪伴：(?:✓\s*)?开\s*(.+)$/;
-/** `状态：陪伴 · 开 2 分钟` / `状态：陪伴 · 关` */
-const STATE_COMPANION = /^状态：陪伴\s*·/;
+/** `看一眼：✓ 开 1 分钟` / `看一眼：开 1 分钟`（旧的 `陪伴：开 …` 也认） → 档位毫秒数 */
+const COMPANION_START = /^(?:看一眼|陪伴)：(?:✓\s*)?开\s*(.+)$/;
+/** `状态：看一眼 · 开 2 分钟` / `状态：看一眼 · 关` */
+const STATE_COMPANION = /^状态：看一眼\s*·/;
 /** `状态：嗓子 · …` / `状态：眼睛 · …` / `状态：歌词 · …` */
 const STATE_VOICE = /^状态：嗓子\s*·/;
 const STATE_VISION = /^状态：眼睛\s*·/;
 const STATE_LYRIC = /^状态：歌词\s*·/;
+const STATE_SEARCH = /^状态：联网查\s*·/;
 /** `状态：接入 · …`（两个空格容忍） */
 const STATE_DSH = /^状态：接入\s*·/;
+/** `状态：陪伴 · 开 正常` / `状态：陪伴 · 关`（11-09 改名：原「看护」） */
+const STATE_WATCH = /^状态：(?:游戏)?陪伴\s*·/;
 
 /**
  * 标签 → 动作。认不出的（第三方/旧版本残留）返回 null，调用方静默忽略。
@@ -247,12 +330,20 @@ const STATE_DSH = /^状态：接入\s*·/;
  * 当前值只用来显示——这样不怕壳把旧标签回传回来。
  */
 export function parsePetMenuLabel(label: string): PetMenuAction | null {
-  const text = typeof label === 'string' ? label.trim() : '';
-  if (text === '') return null;
+  const raw = typeof label === 'string' ? label.trim() : '';
+  if (raw === '') return null;
+  // 【11-09 晚 m16044】一级分支标题带状态（`看一眼 · 开 2 分钟：现在看一眼`），
+  // 解析前先把冒号前那段里的「 · 状态」剥掉，后面的规则全部照旧认。
+  // 【汐儿 · 11-10 m17982】这一层改名「游戏陪伴」，解析时统一切回「陪伴」，老标签继续认
+  const text = raw
+    .replace(/^游戏陪伴\s*·[^：]*：/u, '陪伴：')
+    .replace(/^(看一眼|陪伴)\s*·[^：]*：/u, '$1：');
   if (STATE_COMPANION.test(text)) return { kind: 'companion-toggle' };
   if (STATE_VOICE.test(text)) return { kind: 'cycle-voice' };
   if (STATE_VISION.test(text)) return { kind: 'cycle-vision' };
   if (STATE_LYRIC.test(text)) return { kind: 'lyric-toggle' };
+  if (STATE_SEARCH.test(text)) return { kind: 'search-toggle' };
+  if (STATE_WATCH.test(text)) return { kind: 'watch-toggle' };
   if (STATE_DSH.test(text)) {
     // 一条开关（`… · 关` / `… · ✓ 开（会话名）`），一条「选会话…」（开网页挑）
     const rest = text.replace(/^状态：接入\s*·\s*/u, '').replace(/^✓\s*/u, '').trim();
@@ -262,7 +353,14 @@ export function parsePetMenuLabel(label: string): PetMenuAction | null {
     return { kind: 'dsh-picker' };
   }
   if (text.startsWith(STATE_PREFIX)) return { kind: 'status', text: text.slice(STATE_PREFIX.length) };
-  if (text === '陪伴：看一眼') return { kind: 'look' };
+  if (text === '看一眼：现在看一眼' || text === '陪伴：看一眼') return { kind: 'look' };
+  // 11-09 晚 m16044：一级分支里的开关（标题带状态，剥完就是这两条）
+  if (text === '看一眼：✓ 开着（点一下关）' || text === '看一眼：关掉') return { kind: 'companion-stop' };
+  if (text === '看一眼：开（点一下开）') return { kind: 'companion-toggle' };
+  if (text === '陪伴：✓ 开着（点一下关）' || text === '陪伴：关掉' || text === '看护：关看护') {
+    return { kind: 'watch-stop' };
+  }
+  if (text === '陪伴：开（点一下开）') return { kind: 'watch-toggle' };
   if (text === '陪伴：关陪伴') return { kind: 'companion-stop' };
   if (text === '歌词：开歌词') return { kind: 'lyric-start' };
   if (text === '歌词：关歌词' || text === '歌词：✓ 关歌词') return { kind: 'lyric-stop' };
@@ -270,16 +368,47 @@ export function parsePetMenuLabel(label: string): PetMenuAction | null {
   if (text === '碎碎念：自动开' || text === '碎碎念：自动关（点一下开）') return { kind: 'whisper-enable' };
   if (text === '碎碎念：✓ 自动关' || text === '碎碎念：✓ 自动开（点一下关）') return { kind: 'whisper-disable' };
   if (text === '碎碎念：打开池子' || text === '碎碎念：✓ 打开池子') return { kind: 'whisper-pool' };
+  if (
+    text === '陪伴：✓ 会出声（点一下静音）' ||
+    text === '陪伴：不出声（点一下开）' ||
+    text === '陪伴：✓ 出声（点一下关）' ||
+    text === '陪伴：出声（点一下开）'
+  ) {
+    return { kind: 'watch-voice-toggle' };
+  }
+  if (text === '陪伴：看他看到的（记录目录）…') return { kind: 'watch-open-log' };
+  const watchPrefix = text.startsWith(WATCH_PREFIX)
+    ? WATCH_PREFIX
+    : text.startsWith(LEGACY_WATCH_PREFIX)
+      ? LEGACY_WATCH_PREFIX
+      : '';
+  if (watchPrefix !== '') {
+    // 标签尾巴可能带「（最多 4 张/分）」，解析前先摘掉（哥哥 11-09 要的账单）
+    const rest = text
+      .slice(watchPrefix.length)
+      .replace(/^✓\s*/, '')
+      .replace(/[（(].*$/, '')
+      .trim();
+    if (rest === '轻') return { kind: 'watch-start', pace: 'calm' };
+    if (rest === '正常') return { kind: 'watch-start', pace: 'normal' };
+    if (rest === '密') return { kind: 'watch-start', pace: 'dense' };
+    const modeHit = /^模式\s*(?:✓\s*)?(全屏|自动|窗口)$/u.exec(rest);
+    if (modeHit) {
+      const word = modeHit[1];
+      return { kind: 'watch-mode', mode: word === '全屏' ? 'full' : word === '窗口' ? 'window' : 'auto' };
+    }
+    return null;
+  }
   if (text.startsWith(WHISPER_PREFIX)) {
     const rest = text.slice(WHISPER_PREFIX.length).replace(/^✓\s*/, '').trim();
-    // 「自定义（420 秒）」/ 老文案「自定义间隔…」都算打开小窗
-    if (rest.startsWith('自定义')) return { kind: 'whisper-custom' };
+    // 「间隔（420 秒）…」/「自定义（420 秒）」/ 老文案「自定义间隔…」都算打开小窗
+    if (rest.startsWith('间隔') || rest.startsWith('自定义')) return { kind: 'whisper-custom' };
     const hit = WHISPER_INTERVALS.find((item) => item.label === rest);
     return hit ? { kind: 'whisper-interval', seconds: hit.seconds } : null;
   }
   const start = COMPANION_START.exec(text);
   // 「陪伴：自定义…」不带「开」，要在正则之前单独认（哥哥 11-02 报：点了没窗口）
-  if (/^陪伴：(?:✓\s*)?自定义/.test(text)) return { kind: 'companion-custom' };
+  if (/^(?:看一眼|陪伴)：(?:✓\s*)?自定义/.test(text)) return { kind: 'companion-custom' };
   if (start) {
     const tier = start[1].trim();
     if (tier.startsWith('自定义')) return { kind: 'companion-custom' };
@@ -302,14 +431,15 @@ export function petMenuFeedback(
       // 状态文案由宿主按**当下真实状态**拼好放进 message（陪伴/歌词/看图/声音四项）
       return result.message ?? action.text;
     case 'companion-start':
-      return `陪伴开了：每 ${Math.round(action.intervalMs / 1000)} 秒看一眼`;
+      return `看一眼开了：每 ${Math.round(action.intervalMs / 1000)} 秒看一次`;
     case 'companion-custom':
       return '自定义窗口打开了：填分钟数点保存';
     case 'companion-stop':
-      return '陪伴停了';
+      return '看一眼停了';
     // 开关类：宿主会把「切换成了什么」放进 message（例：嗓子切换为本地）
     case 'companion-toggle':
     case 'lyric-toggle':
+    case 'search-toggle':
     case 'cycle-vision':
     case 'cycle-voice':
       return result.message ?? '切换好了';
@@ -335,5 +465,17 @@ export function petMenuFeedback(
       return result.message ?? '选会话的页面打开了';
     case 'dsh-install':
       return result.message ?? '插件装好了，重启 DSH 生效';
+    case 'watch-start':
+      return result.message ?? `陪伴开了（${watchPaceWord(action.pace)}）：屏幕真有变化才说`;
+    case 'watch-stop':
+      return '陪伴停了';
+    case 'watch-toggle':
+      return result.message ?? '陪伴切换好了';
+    case 'watch-voice-toggle':
+      return result.message ?? '陪伴的声音切换好了';
+    case 'watch-mode':
+      return result.message ?? `陪伴换成「${watchModeWord(action.mode)}」模式了`;
+    case 'watch-open-log':
+      return result.message ?? '记录目录打开了';
   }
 }

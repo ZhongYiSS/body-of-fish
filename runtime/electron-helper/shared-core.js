@@ -1026,7 +1026,8 @@ function buildPetMenuTree(items) {
 		if (!item || item.owner !== COMPANION_OWNER) continue;
 		const label = String(item.label || "");
 		if (!label) continue;
-		// 一级「看一眼」由 sprite.js 写死（热键/点击都认那条原文），不在这里重复产出
+		// 11-09 晚起「看一眼」也走宿主注册（以前这里要跳过 sprite.js 写死的那条，现在不用了；
+		// 留着这行只为兼容还在回传旧标签的桌面壳）
 		if (label === "陪伴：看一眼") continue;
 		const parts = label.split("：").map((s) => s.trim()).filter(Boolean);
 		if (!parts.length) continue;

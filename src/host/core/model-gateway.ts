@@ -101,8 +101,13 @@ export interface ModelStatus {
 /** core 只认这个接口；具体哪个后端由配置决定。 */
 export interface ModelGateway {
   chat(request: ChatRequest): AsyncIterable<ChatDelta>;
-  /** 返回一句看图结论；失败抛错由调用方转成 ModelError */
-  vision(image: Uint8Array, prompt: string, signal?: AbortSignal): Promise<string>;
+  /** 返回一句看图结论；失败抛错由调用方转成 ModelError。
+   *  【汐儿 · 11-10 m17986】给了 `onDelta` 就走流式：第一句一到就能先判、先合成嗓子。 */
+  vision(
+    image: Uint8Array,
+    prompt: string,
+    options?: { signal?: AbortSignal; onDelta?: (chunk: string) => void },
+  ): Promise<string>;
   speak(text: string, options?: { voice?: string; signal?: AbortSignal }): Promise<Uint8Array>;
   /** 设置页三张卡的红/绿状态 */
   status(): Partial<Record<ModelCapability, ModelStatus>>;

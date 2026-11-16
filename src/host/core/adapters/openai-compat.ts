@@ -33,6 +33,36 @@ export interface RemoteBackend {
   baseUrl: string;
   model: string;
   apiKey?: string;
+  /** 额外的请求头（独立模式的设置里填的，比如 opencode Go 要的 x-opencode-session）。
+   *  只补不抢：content-type / authorization 这些传输与鉴权头一律不许被覆盖。 */
+  extraHeaders?: Record<string, string>;
+}
+
+/** 传输与鉴权类头：调用方填的同名头一律忽略，避免把鉴权改坏。 */
+const RESERVED_HEADERS = new Set([
+  'content-type',
+  'accept',
+  'authorization',
+  'x-api-key',
+  'host',
+  'content-length',
+  'connection',
+  'transfer-encoding',
+  'cookie',
+  'set-cookie',
+]);
+
+/** 把自定义头并进一份基础头（保留基础头优先）。 */
+function withExtraHeaders(base: Record<string, string>, extra?: Record<string, string>): Record<string, string> {
+  if (!extra) return base;
+  const out = { ...base };
+  for (const [rawKey, value] of Object.entries(extra)) {
+    const key = String(rawKey ?? '').trim();
+    if (!key || typeof value !== 'string') continue;
+    if (RESERVED_HEADERS.has(key.toLowerCase())) continue;
+    out[key] = value;
+  }
+  return out;
 }
 
 /** 网络/本地后端共用的调用参数。 */
@@ -130,10 +160,13 @@ async function postJson(
   try {
     response = await fetchImpl(chatCompletionsUrl(backend.baseUrl), {
       method: 'POST',
-      headers: {
-        'content-type': 'application/json',
-        ...(backend.apiKey?.trim() ? { authorization: `Bearer ${backend.apiKey.trim()}` } : {}),
-      },
+      headers: withExtraHeaders(
+        {
+          'content-type': 'application/json',
+          ...(backend.apiKey?.trim() ? { authorization: `Bearer ${backend.apiKey.trim()}` } : {}),
+        },
+        backend.extraHeaders,
+      ),
       body: JSON.stringify(body),
       signal,
     });
@@ -173,31 +206,120 @@ export async function compatChat(
   return text;
 }
 
+
+/**
+ * 流式识图（【汐儿 · 11-10 m17986 第三刀】）。
+ *
+ * 为什么要流式：合并成一次调用之后，那句话排在三、四行，等整段写完才开口，
+ * 白等了模型生成后面那截。流式一到就把文本回调出去，上层可以「说到哪算哪」。
+ *
+ * 只在 options.onDelta 存在时才走这条路；端点不认 stream/字段被拒时，调用方退回整段请求。
+ */
+async function streamVision(
+  backend: RemoteBackend,
+  body: Record<string, unknown>,
+  options: CompatOptions & { onDelta?: (chunk: string) => void },
+): Promise<string> {
+  const fetchImpl = options.fetchImpl ?? globalThis.fetch;
+  if (typeof fetchImpl !== 'function') {
+    throw new ModelCallError('endpoint-down', '这个环境没有 fetch，调不了网络模型');
+  }
+  const timeout = AbortSignal.timeout(options.timeoutMs ?? DEFAULT_TIMEOUT_MS);
+  const signal = options.signal ? AbortSignal.any([options.signal, timeout]) : timeout;
+  let response: Response;
+  try {
+    response = await fetchImpl(chatCompletionsUrl(backend.baseUrl), {
+      method: 'POST',
+      headers: withExtraHeaders(
+        {
+          'content-type': 'application/json',
+          accept: 'text/event-stream',
+          ...(backend.apiKey?.trim() ? { authorization: `Bearer ${backend.apiKey.trim()}` } : {}),
+        },
+        backend.extraHeaders,
+      ),
+      body: JSON.stringify({ ...body, stream: true }),
+      signal,
+    });
+  } catch (error) {
+    if (timeout.aborted) throw new ModelCallError('timeout', '流式识图等太久没回应');
+    const reason = error instanceof Error ? error.message : String(error);
+    throw new ModelCallError('endpoint-down', `连不上 ${backend.baseUrl}：${reason}`);
+  }
+  if (!response.ok) throw mapHttpError(response.status, await response.text());
+  if (!response.body) throw new ModelCallError('bad-response', '流式响应没有 body');
+
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let buffered = '';
+  let text = '';
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    buffered += decoder.decode(value, { stream: true });
+    let cut = buffered.indexOf('\n');
+    while (cut >= 0) {
+      const line = buffered.slice(0, cut).trim();
+      buffered = buffered.slice(cut + 1);
+      cut = buffered.indexOf('\n');
+      if (!line.startsWith('data:')) continue;
+      const payload = line.slice(5).trim();
+      if (payload === '' || payload === '[DONE]') continue;
+      try {
+        const chunk = JSON.parse(payload) as { choices?: { delta?: { content?: string } }[] };
+        const delta = chunk.choices?.[0]?.delta?.content;
+        if (typeof delta === 'string' && delta !== '') {
+          text += delta;
+          options.onDelta?.(delta);
+        }
+      } catch {
+        /* 半行 JSON 不算错，下一轮拼上 */
+      }
+    }
+  }
+  if (text === '') throw new ModelCallError('bad-response', '识图流式回了个空结论');
+  return text;
+}
+
 /** 看图说一句话（data URL 塞进 user 消息）。 */
 export async function compatVision(
   backend: RemoteBackend,
   imageBytes: Uint8Array,
   prompt: string,
-  options: CompatOptions & { mime?: string } = {},
+  options: CompatOptions & { mime?: string; onDelta?: (chunk: string) => void } = {},
 ): Promise<string> {
-  const json = await postJson(
-    backend,
+  const messages = [
     {
-      model: backend.model,
-      messages: [
-        {
-          role: 'user',
-          content: [
-            { type: 'text', text: prompt },
-            { type: 'image_url', image_url: { url: toDataUrl(imageBytes, options.mime) } },
-          ],
-        },
+      role: 'user',
+      content: [
+        { type: 'text', text: prompt },
+        { type: 'image_url', image_url: { url: toDataUrl(imageBytes, options.mime) } },
       ],
-      temperature: 0.8,
-      stream: false,
     },
-    options,
-  );
+  ];
+  /**
+   * 【11-09 晚 m16721】识图为什么慢：不是图大，是**模型在思考**。
+   * 同一张 1280×800 拼图打 opencode Go 的 `deepseek-v4.1-flash`：
+   * 默认 2877 个 reasoning token → **28.9 秒**；加 `reasoning_effort:'none'` → 0 个 → **7.5 秒**，
+   * 读出来的内容反而更干净（「Codex CLI / WSL / 窗口标题」）。看图不需要长篇推理。
+   * 有些 OpenAI 兼容端点不认这个字段（400），那就去掉再试一次——宁可多 200ms，也不能因为参数被拒就不识图。
+   */
+  const body = { model: backend.model, messages, temperature: 0.8, stream: false };
+  if (options.onDelta) {
+    try {
+      return await streamVision(backend, { ...body, reasoning_effort: 'none' }, options);
+    } catch {
+      /* 流式不通（端点不支持 / 半路断）就退回下面的整段请求，最多多花一次 */
+    }
+  }
+  let json: unknown;
+  try {
+    json = await postJson(backend, { ...body, reasoning_effort: 'none' }, options);
+  } catch (error) {
+    const code = error instanceof ModelCallError ? error.code : '';
+    if (code !== 'bad-response' && code !== 'unsupported') throw error;
+    json = await postJson(backend, body, options);
+  }
   const text = extractText(json);
   if (!text) throw new ModelCallError('bad-response', '识图回了个空结论');
   return text;
@@ -220,10 +342,13 @@ export async function compatSpeak(
   try {
     response = await fetchImpl(url, {
       method: 'POST',
-      headers: {
-        'content-type': 'application/json',
-        ...(backend.apiKey?.trim() ? { authorization: `Bearer ${backend.apiKey.trim()}` } : {}),
-      },
+      headers: withExtraHeaders(
+        {
+          'content-type': 'application/json',
+          ...(backend.apiKey?.trim() ? { authorization: `Bearer ${backend.apiKey.trim()}` } : {}),
+        },
+        backend.extraHeaders,
+      ),
       body: JSON.stringify({
         model: backend.model,
         input: text,

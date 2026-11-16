@@ -26,7 +26,7 @@ function modelService() {
     },
     isReady: () => true,
     canWhisper: () => false,
-    connection: () => ({ baseUrl: 'https://example.test/v1', model: 'configured-model', apiKey: 'test-key' }),
+    connection: () => ({ baseUrl: 'https://example.test/v1', model: 'configured-model', apiKey: 'test-key', extraHeaders: {} }),
     getSettings: () => ({ whisperIntervalSec: 300 }),
     dispose: () => calls.push('dispose'),
   };
