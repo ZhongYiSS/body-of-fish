@@ -404,3 +404,46 @@ test('设置页：脚本真跑一遍不报错，且能把值填进控件', async
   // ReferenceError 被空 catch 吞掉，页面看着正常、下拉永远只有「（没选，按全屏）」一项。
   assert.ok(asked.some((url) => url.includes('/dsh-pet-7340/windows')), '必须请求过窗口列表：' + asked.join(','));
 });
+
+test('嗓子：普通保存不能抹掉本地地址与发声协议（11-16 声音丢失）', () => {
+  const base = {
+    model: {
+      tts: {
+        enabled: true,
+        kind: 'local',
+        endpoint: 'http://127.0.0.1:9880',
+        model: '希儿-社区版',
+        protocol: 'system',
+      },
+    },
+  };
+  // 页面回显成空串（切过「关/本地/云端」之后框里是空的）→ 空串只算"没填"，不能覆盖已有地址
+  const next = applyPatch(base as never, {
+    name: '小蓝',
+    voiceMode: 'local',
+    voiceEndpoint: '',
+    voiceModel: '希儿-社区版',
+  } as never);
+  const tts = (next.model as Record<string, unknown>).tts as Record<string, unknown>;
+  assert.equal(tts.endpoint, 'http://127.0.0.1:9880', '空串不能把本地地址抹成空');
+  assert.equal(tts.protocol, 'system', '普通保存要把旧协议带过来，否则嗓子被判"没配好"');
+  assert.equal(tts.model, '希儿-社区版');
+
+  // 显式换协议照写
+  const edge = applyPatch(base as never, { voiceProtocol: 'edge' } as never);
+  const edgeTts = (edge.model as Record<string, unknown>).tts as Record<string, unknown>;
+  assert.equal(edgeTts.protocol, 'edge');
+  assert.equal(edgeTts.endpoint, 'http://127.0.0.1:9880');
+
+  // 显式写 openai 才是"不要协议"
+  const openai = applyPatch(base as never, { voiceProtocol: 'openai' } as never);
+  const openTts = (openai.model as Record<string, unknown>).tts as Record<string, unknown>;
+  assert.equal(openTts.protocol, undefined);
+
+  // 本地后端：原来没地址、这次填了 → 照填
+  const fill = applyPatch({ model: { tts: { enabled: true, kind: 'local', endpoint: '' } } } as never, {
+    voiceEndpoint: 'http://127.0.0.1:9880',
+  } as never);
+  const fillTts = (fill.model as Record<string, unknown>).tts as Record<string, unknown>;
+  assert.equal(fillTts.endpoint, 'http://127.0.0.1:9880');
+});

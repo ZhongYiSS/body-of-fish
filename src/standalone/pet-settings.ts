@@ -499,7 +499,10 @@ export function applyPatch(config: Dict, patch: PetSettingsPatch): Dict {
       if (nextMode === 'off') return { enabled: false, backend: { kind: 'local', endpoint: '' } };
       const backend = base.backend;
       if (nextMode === 'local') {
-        const point = endpoint !== undefined ? endpoint : backend.kind === 'local' ? backend.endpoint : '';
+        // 空串 = 没填，不是"清掉"：本地后端没有地址就是哑的（11-16 声音丢失事故）
+        const fallbackPoint = backend.kind === 'local' ? backend.endpoint : '';
+        const typed = endpoint !== undefined ? endpoint.trim() : undefined;
+        const point = typed !== undefined && typed !== '' ? typed : fallbackPoint;
         const name = model !== undefined ? model : backend.kind === 'session' ? '' : (backend.model ?? '');
         return { enabled: true, backend: { kind: 'local', endpoint: point, ...(name ? { model: name } : {}) } };
       }
@@ -534,10 +537,10 @@ export function applyPatch(config: Dict, patch: PetSettingsPatch): Dict {
       patch.voiceApiKey,
       patch.clearVoiceApiKey,
     );
-    // 发声协议只挂在 tts 上；切回 openai 时把 sovits 专有字段一并丢掉（配置文件别留幽灵字段）
-    const speaksTouched =
-      patch.voiceProtocol !== undefined || patch.voiceRefAudio !== undefined || patch.voicePromptText !== undefined;
-    if (speaksTouched && tts.backend.kind !== 'session') {
+    // 发声协议只挂在 tts 上；切回 openai 时把 sovits 专有字段一并丢掉（配置文件别留幽灵字段）。
+    // 不论这次有没有显式传协议，都要把旧协议带过来——否则一次普通保存就会把 protocol 抹掉，
+    // 嗓子被判"没配好"而只出字不出声（11-16 声音丢失事故）。
+    if (tts.backend.kind !== 'session') {
       const oldBackend = current.tts.backend.kind === 'session' ? undefined : current.tts.backend;
       const protocol = patch.voiceProtocol ?? oldBackend?.protocol;
       const keep = (value: string | undefined, fallback: string | undefined): string =>
