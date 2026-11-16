@@ -45,9 +45,17 @@ describe('桌面端「重载配置」—— 菜单 → 宿主重启 Helper', () 
   test('桌面端：菜单项存在、动作有分支，且请求的路由名与宿主一致', () => {
     assert.ok(/label: '重载配置', action: 'reload'/.test(sprite), '桌面端右键菜单必须有「重载配置」项');
     assert.ok(/leaf\.action === 'reload'/.test(sprite), 'onMenuAction 必须有 reload 分支（否则点了没反应）');
-    const m = /fetch\(BASE \+ '\/([a-z-]+)', \{ method: 'POST' \}\)/.exec(sprite);
-    assert.ok(m, "reloadDesktop() 必须 POST 到 BASE + '/<路由名>'（bridge 已支持 POST，无需新增 IPC）");
+    const m = /S\.postAction\(BASE \+ '\/([a-z-]+)'/.exec(sprite);
+    assert.ok(m, "reloadDesktop() 必须 POST 到 BASE + '/<路由名>'（走 S.postAction：它带能力令牌）");
     const route = m[1];
+    assert.ok(
+      !/fetch\(BASE \+ '\/reload'/.test(sprite),
+      '不许裸 fetch /reload：独立模式下没令牌就是 403，而 .catch 只接网络错 → 静默失效',
+    );
+    assert.ok(
+      /S\.postAction\(BASE \+ '\/pet-display', \{ id: this\.pet\.id, display \}\)/.test(sprite),
+      '「显示位置」同样必须走 S.postAction（带令牌、body 自动序列化）',
+    );
     assert.ok(
       new RegExp(`rest === '${route}'`).test(host),
       `桌面端请求的路由 /${route} 在宿主不存在（改名只改了一侧）`,

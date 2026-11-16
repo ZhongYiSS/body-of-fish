@@ -137,6 +137,9 @@ function ensureDaemon() {
     return false;
   }
   const proc = child;
+  // 管道写失败要接住：听.py 一旦死掉，进程对象还在，下一次 stdin.write 会抛 EPIPE 未捕获
+  // （Electron 主进程里就是一条红色的 uncaught exception 弹窗）。
+  proc.stdin.on('error', (e) => log('管道错误：' + (e && e.message ? e.message : String(e))));
   buffer = '';
   proc.stdout.setEncoding('utf8');
   proc.stdout.on('data', (chunk) => {
@@ -179,7 +182,12 @@ function toggle() {
     log('管道没准备好，这次按了不算');
     return;
   }
-  child.stdin.write('toggle\n');
+  try {
+    child.stdin.write('toggle\n');
+  } catch (e) {
+    log('按了没送进去：' + (e && e.message ? e.message : String(e)));
+    child = null; // 下次按热键重新拉起
+  }
 }
 
 /** 按住键的自动重复也一并丢（与 toggle 同一套去重） */

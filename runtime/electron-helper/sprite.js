@@ -1941,8 +1941,10 @@ class PetSprite {
   // 本请求由**即将被重启的这个进程**发出：响应可能永远不回（宿主杀进程时回调地址已失效），
   // 故不 await、不重试，失败只记日志——重载本身就是把本进程换掉。
   reloadDesktop() {
-    fetch(BASE + '/reload', { method: 'POST' }).catch((e) => {
-      console.warn('[dsh-pet] 重载配置请求失败（宿主不可达？）', e);
+    // 走 S.postAction：它会带上能力令牌（裸 fetch 在独立模式下是 403「请从桌宠菜单重新打开设置」，
+    // 而这里只 .catch 网络错，403 是正常响应 → 静默失效，点了像没点）。
+    void S.postAction(BASE + '/reload').then((ok) => {
+      if (!ok) console.warn('[dsh-pet] 重载配置请求没成功（宿主不可达或被门禁挡了？）');
     });
   }
 
@@ -1955,12 +1957,9 @@ class PetSprite {
   // （宿主杀进程时回调地址已失效），故不 await、不重试，失败只记日志。
   setPetDisplay(display) {
     if (!display) return;
-    fetch(BASE + '/pet-display', {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ id: this.pet.id, display }),
-    }).catch((e) => {
-      console.warn('[dsh-pet] 显示位置请求失败（宿主不可达？）', e);
+    // 同上：必须带令牌，否则 403 被当成「宿主不可达」静默吞掉。
+    void S.postAction(BASE + '/pet-display', { id: this.pet.id, display }).then((ok) => {
+      if (!ok) console.warn('[dsh-pet] 显示位置请求没成功（宿主不可达或被门禁挡了？）');
     });
   }
 

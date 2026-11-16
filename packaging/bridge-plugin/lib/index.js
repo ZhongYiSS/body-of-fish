@@ -223,6 +223,38 @@ function configStampOf() {
 }
 
 export function apply(ctx) {
+  /**
+   * 【汐儿 · 11-16 体检 S1】插件被刷新 / 卸载时要能把自己收干净。
+   *
+   * 以前这里只注册、从不清理：定时器、bus 钩子、ctx 事件、HTTP 路由 —— 每刷新一次就多一份，
+   * 跑久了同一轮回复会被投递好几遍。现在所有「注册」都过 `listen` / `onCleanup`，
+   * 卸载时一次性收掉。
+   */
+  const cleanups = []
+  let disposed = false
+  const onCleanup = (fn) => {
+    if (typeof fn === 'function') cleanups.push(fn)
+  }
+  const listen = (target, event, handler) => {
+    if (target === null || target === undefined || typeof target.on !== 'function') return
+    onCleanup(target.on(event, handler))
+  }
+  const dispose = () => {
+    if (disposed) return
+    disposed = true
+    for (const fn of cleanups.splice(0)) {
+      try {
+        fn()
+      } catch {
+        // 单个清理失败不该拦住别的
+      }
+    }
+  }
+  try {
+    listen(ctx, 'dispose', dispose)
+  } catch {
+    // 老版本没有 dispose 事件就算了
+  }
   let config = loadConfig()
   /**
    * 【本鱼 · 11-05】配置文件是**全机一份**，但每个工作区各有一份插件实例，各自在启动时读一次。
@@ -238,6 +270,11 @@ export function apply(ctx) {
   }
   const mounted = new Set()
   const looked = new Set()
+  // 【汐儿 · 11-16 体检 S1】卸载时把两个 Set 也清掉（它们没有上界，长跑会慢慢攒）
+  onCleanup(() => {
+    mounted.clear()
+    looked.clear()
+  })
   /** 最近一次注入/识图的结果，给 /state 和设置页看 */
   const last = { inject: null, bubble: null, look: null, error: null }
 
@@ -390,7 +427,12 @@ export function apply(ctx) {
     const agent = agentOf(handle)
     if (!agent || typeof agent.followup !== 'function') throw new Error('这个会话不能注入（没有 followup）')
     const message = await makeUserMessage(body)
-    agent.followup(message)
+    // 【汐儿 · 11-16 体检 S4】原来不 await 也不接 catch：followup 一抛（会话正好在收尾、队列满了），
+    // 就是一个未处理的 Promise 拒绝，接口那边却已经回 200「注入成功」。
+    // 这里接住、记进 last.error 给设置页看；不阻塞返回（注入本来就是异步排队的）。
+    void Promise.resolve(agent.followup(message)).catch((error) => {
+      last.error = { at: new Date().toISOString(), where: 'inject', message: String(error?.message ?? error) }
+    })
     const sessionId2 = String(sessionOf(handle)?.id ?? '')
     last.inject = { at: new Date().toISOString(), sessionId: sessionId2, chars: body.length }
     return { sessionId: sessionId2, chars: body.length }
@@ -633,7 +675,7 @@ export function apply(ctx) {
     if (!bus || typeof bus.on !== 'function') return
     mounted.add(sid)
     try {
-      bus.on('agent/inbox/inserted', (payload) => {
+      listen(bus, 'agent/inbox/inserted', (payload) => {
         refreshConfig()
         if (!isActiveInstance()) return // 旧实例退场（同 turn-stopping）
         const message = (payload && payload.message) || payload
@@ -658,7 +700,7 @@ export function apply(ctx) {
     // 所以再挂一道 `session/event`：会话里出现带图片的 user/message 就交给桌宠看。
     // 两条路都可能命中，靠 `looked` 按 attachmentId 去重，不会看两遍。
     try {
-      bus.on('session/event', (subject, event) => {
+      listen(bus, 'session/event', (subject, event) => {
         refreshConfig()
         if (!isActiveInstance()) return // 旧实例（刷新前）自己退场，别再重复投递
         if (!config.enabled || !config.lookImages) return
@@ -682,7 +724,7 @@ export function apply(ctx) {
       // 同上
     }
     try {
-      bus.on('agent/turn-stopping', () => {
+      listen(bus, 'agent/turn-stopping', () => {
         refreshConfig()
         if (!isActiveInstance()) return // 同上：刷新后旧实例的钩子不许再送一遍
         if (!config.enabled || (!config.bubbleReply && !config.speakReply)) return
@@ -740,7 +782,7 @@ export function apply(ctx) {
     for (const handle of Array.isArray(list) ? list : []) mount(handle)
     for (const eventName of ['agent/created', 'agent/added', 'session/added']) {
       try {
-        ctx.on(eventName, (payload) => {
+        listen(ctx, eventName, (payload) => {
           const handle = (payload && payload.agent) || payload
           mount(handle)
         })
@@ -765,13 +807,15 @@ export function apply(ctx) {
   } catch {
     // 忽略
   }
-  setTimeout(() => {
+  onCleanup(() => clearInterval(publishTimer))
+  const kickoffTimer = setTimeout(() => {
     try {
       publishDiscovery(guessBaseUrl())
     } catch {
       // 忽略
     }
   }, 1500)
+  onCleanup(() => clearTimeout(kickoffTimer))
 
   // ---- HTTP：/api/pet-bridge -------------------------------------------
   const json = (res, status, value) => {
@@ -784,27 +828,47 @@ export function apply(ctx) {
     res.writeHead(status, { 'content-type': 'text/html; charset=utf-8', 'content-length': String(body.length), 'cache-control': 'no-store' })
     res.end(body)
   }
-  const readBody = (req) => new Promise((resolve) => {
-    const chunks = []
-    req.on('data', (chunk) => {
-      chunks.push(chunk)
-      if (Buffer.concat(chunks).length > 200_000) req.destroy()
+  const MAX_BODY = 200_000
+  /**
+   * 【汐儿 · 11-16 体检 S3】超限时 resolve(null)，由调用方回 413。
+   * 以前是 `req.destroy()` —— 连接被砍之后 `end` 不保证还会来，这个 Promise 就永远不 resolve，
+   * 请求挂着、连接占着。现在读够上限就收手，把「太大」当成正常结果往上交。
+   */
+  const readBody = (req) =>
+    new Promise((resolve) => {
+      const chunks = []
+      let size = 0
+      let over = false
+      req.on('data', (chunk) => {
+        if (over) return
+        size += chunk.length
+        if (size > MAX_BODY) {
+          over = true
+          chunks.length = 0
+          resolve(null)
+          return
+        }
+        chunks.push(chunk)
+      })
+      req.on('end', () => {
+        if (over) return
+        const text = Buffer.concat(chunks).toString('utf8')
+        try {
+          resolve(text.trim() === '' ? {} : JSON.parse(text))
+        } catch {
+          resolve({})
+        }
+      })
+      req.on('error', () => resolve(null))
     })
-    req.on('end', () => {
-      const text = Buffer.concat(chunks).toString('utf8')
-      try {
-        resolve(text.trim() === '' ? {} : JSON.parse(text))
-      } catch {
-        resolve({})
-      }
-    })
-    req.on('error', () => resolve({}))
-  })
 
-  ctx.webServer.register({
+  const unregisterRoute = ctx.webServer.register({
     kind: 'prefix',
     path: API_PREFIX,
     handler: async (req, res) => {
+      // 【汐儿 · 11-16 体检 S2】旧实例（刷新前的那个）不该再接着服务：它手里的配置是陈的，
+      // 拿着陈旧 config 去写 CONFIG_PATH 会把用户刚改好的设置盖回去。
+      if (!isActiveInstance()) return json(res, 503, { ok: false, error: '桥已经被新的插件实例接管' })
       const url = new URL(req.url ?? '/', 'http://localhost')
       const route = url.pathname.slice(API_PREFIX.length) || '/'
       const host = String(req.headers.host ?? '')
@@ -832,6 +896,7 @@ export function apply(ctx) {
         }
         if (route === '/config' && (req.method === 'POST' || req.method === 'PUT')) {
           const patch = await readBody(req)
+          if (patch === null) return json(res, 413, { ok: false, error: '请求体太大（上限 200KB）' })
           config = normalizeConfig(patch)
           writeJsonAtomic(CONFIG_PATH, config)
           publishDiscovery(guessBaseUrl())
@@ -839,11 +904,13 @@ export function apply(ctx) {
         }
         if (route === '/say' && req.method === 'POST') {
           const body = await readBody(req)
+          if (body === null) return json(res, 413, { ok: false, error: '请求体太大（上限 200KB）' })
           const result = await injectText(body.text, body.sessionId)
           return json(res, 200, { ok: true, ...result })
         }
         if (route === '/look' && req.method === 'POST') {
           const body = await readBody(req)
+          if (body === null) return json(res, 413, { ok: false, error: '请求体太大（上限 200KB）' })
           const file = String(body.file ?? '')
           if (file === '') return json(res, 400, { ok: false, error: 'file 必填' })
           const result = await petPost('/dsh-pet-7340/look', { file, name: String(body.name ?? '') })
@@ -861,6 +928,7 @@ export function apply(ctx) {
       }
     },
   })
+  onCleanup(unregisterRoute)
 }
 
 const PAGES = `<!doctype html><html lang="zh-CN"><head><meta charset="utf-8">

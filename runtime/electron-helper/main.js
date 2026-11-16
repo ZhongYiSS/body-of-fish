@@ -47,7 +47,7 @@ try {
 }
 const { app, BrowserWindow, ipcMain, screen, shell, protocol, Tray, Menu, nativeImage, globalShortcut } = electronApi;
 const path = require('node:path');
-const { execFileSync } = require('node:child_process');
+const { execFile, execFileSync } = require('node:child_process');
 const { readFileSync, writeFileSync } = require('node:fs');
 const fsPromises = require('node:fs/promises');
 // 点击穿透兜底通道的纯判定（不依赖 Electron 的 forward 鼠标钩子；见文件头注释）
@@ -233,6 +233,38 @@ function probePrimaryScale() {
   const v = parseProbeOutput(out);
   if (v > 0) writeCachedPrimaryScale(v);
   return v;
+}
+
+/**
+ * 和 probePrimaryScale() 同一件事，但**不阻塞主线程**（显示器变化时用）。
+ * 同步版会 execFileSync 起一个 Electron 子进程，最长卡 20 秒——在 ready 之后卡住就是整个
+ * 桌面小窗卡死（拖动、气泡、热键全停）。调用方是 `setTimeout(...)`，改成 Promise 回调。
+ */
+function probePrimaryScaleAsync() {
+  const opts = {
+    env: { ...process.env, DSH_PET_DPI_PROBE: '1', DSH_PET_BRIDGE: '0', DSH_PET_SMOKE: '0' },
+    timeout: 20000,
+    encoding: 'utf8',
+    windowsHide: true,
+  };
+  return new Promise((resolve) => {
+    execFile(process.execPath, [__filename, '--dsh-pet-dpi-probe'], opts, (error, stdout) => {
+      const out = String(stdout || '') || (error && error.stdout ? String(error.stdout) : '');
+      const v = parseProbeOutput(out);
+      if (v > 0) {
+        writeCachedPrimaryScale(v);
+        resolve(v);
+        return;
+      }
+      if (error) {
+        console.error(
+          '[dsh-pet-desktop-helper] dpi probe failed (async):',
+          String(error && error.message ? error.message : error).split('\n')[0],
+        );
+      }
+      resolve(0);
+    });
+  });
 }
 
 /** 真实主屏 scaleFactor（探测所得；0 = 未知）。开启线性化后 screen API 只会报 1，只能靠它。 */
@@ -699,10 +731,13 @@ async function hostRequest(method, url, body) {
     ...(body ? { 'content-type': 'application/json' } : {}),
     ...(process.env.DSH_PET_API_TOKEN ? { 'x-dsh-pet-token': process.env.DSH_PET_API_TOKEN } : {}),
   };
+  // 超时别省：宿主卡住（比如陪伴正占着抓屏、或它自己死锁）时，这里会永远等下去，
+    // 而 startTray 正 await 它 → 托盘永远不出现、退出也点不到。8 秒足够本机往返。
   const resp = await fetch(ORIGIN + url, {
     method,
     headers,
     body,
+    signal: AbortSignal.timeout(8000),
   });
   return { status: resp.status, body: await resp.text() };
 }
@@ -1085,16 +1120,17 @@ app.whenReady().then(() => {
     // 真实值只能靠探测子进程拿；不一致就刷新缓存，下次启动自动用上。
     if (FORCED_SCALE > 0) {
       setTimeout(() => {
-        const real = probePrimaryScale();
-        if (real > 0 && Math.abs(real - PRIMARY_SCALE) > 1e-6) {
-          console.error(
-            '[dsh-pet-desktop-helper] primary scaleFactor changed ' +
-              PRIMARY_SCALE +
-              ' -> ' +
-              real +
-              '; restart the desktop pet to resize',
-          );
-        }
+        void probePrimaryScaleAsync().then((real) => {
+          if (real > 0 && Math.abs(real - PRIMARY_SCALE) > 1e-6) {
+            console.error(
+              '[dsh-pet-desktop-helper] primary scaleFactor changed ' +
+                PRIMARY_SCALE +
+                ' -> ' +
+                real +
+                '; restart the desktop pet to resize',
+            );
+          }
+        });
       }, 1000).unref?.();
     }
   };
