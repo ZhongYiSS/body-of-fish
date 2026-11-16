@@ -2258,6 +2258,10 @@ export function apply(ctx: any): void {
   const lookOnce = async (): Promise<{ ok: boolean; message?: string }> => {
     // 【汐儿 · 11-15 23:16】一眼看**不再打断**正在说的话（哥哥定：陪伴、一眼看不该掐语音）。
     touchUser();
+    // 【汐儿 · 11-16 晚 m24151】这是哥哥手按的动作：先把「在听 / 在想」撤掉，
+    // 否则他按完看一眼，结果那句 high 也会被 earMuted() 挡掉——看着就像「看一眼把语音挤没了」。
+    setEarPhase('idle');
+    dropHint('think');
     // 先冒「正在偷看」：截屏 + 识图 + 对话要好几秒，不冒的话哥哥只会觉得「没反应」。
     // 【汐儿 · 11-16】封顶 30 秒；成功说完立刻撤掉（失败那句 18 秒自己会走）。
     await statusBubble('本鱼正在偷看…', 30_000);
@@ -2599,8 +2603,12 @@ export function apply(ctx: any): void {
   type EarPhase = 'idle' | 'listen' | 'think';
   let earPhase: EarPhase = 'idle';
   let earPhaseAt = 0;
-  /** 兜底：脚本报上来的状态万一来不及撤（听.py 崩了 / 断线），两分钟自动失效 */
-  const EAR_PHASE_TTL_MS = 120_000;
+  /**
+   * 兜底：脚本报上来的状态万一来不及撤（听.py 崩了 / 断线）就自动失效。
+   * 【汐儿 · 11-16 晚 m24151】原来 120 秒太长——哥哥看到【在听】挂着两分钟。
+   * 收短到 45 秒，另由 ear.js 每 8 秒心跳续命（长按说话也不会中途掉状态）。
+   */
+  const EAR_PHASE_TTL_MS = 45_000;
   const earPhaseNow = (): EarPhase =>
     earPhase !== 'idle' && Date.now() - earPhaseAt > EAR_PHASE_TTL_MS ? 'idle' : earPhase;
   const setEarPhase = (phase: EarPhase): void => {
@@ -2609,6 +2617,16 @@ export function apply(ctx: any): void {
     if (phase === 'listen') pushHint('ear', '【在听】', 'task');
     else if (phase === 'think') pushHint('ear', '【在想】', 'task');
     else dropHint('ear');
+    // 【汐儿 · 11-16 晚 m24151】哥哥看到「头顶气泡 + 提示气泡」两个一起挂：
+    // 头顶那个是听.py 自己写的「我在听…（再按一下停）」（60 秒），和我们的提示层重复。
+    // 一进入「在听 / 在想」，就把头顶气泡收掉，只留提示层那一行。
+    if (phase !== 'idle') {
+      try {
+        state.writePet('main', 'say', { clear: true });
+      } catch {
+        /* 收不掉就算了，不能因为收气泡把嗓子搞挂 */
+      }
+    }
   };
   /** 在听或在想：别的声音让路（manual/urgent 例外） */
   const earMuted = (): boolean => earPhaseNow() !== 'idle';
@@ -4174,6 +4192,11 @@ export function apply(ctx: any): void {
       // 记忆只存正文（配图属展示层，不进上下文——否则下次请求会把标记当历史读回去）
       await memoryStore.remember({ role: 'user', text, source: 'chat' });
       await memoryStore.remember({ role: 'pet', text: generated.text, source: 'chat' });
+      // 【汐儿 · 11-16 晚 m24151】**回话本身就是等待的结束**：先把「在听 / 在想」撤掉再说话。
+      // 不撤的话，下面的 sayWithVoice 走 normal 优先级，会被 earMuted() 的闸挡回来
+      //（ear-busy，不出声也不冒泡）→ show() 永远不执行 → 状态永远停在【在想】= 死锁。
+      setEarPhase('idle');
+      dropHint('think');
       // 回复写进 S；有嗓子时气泡时长跟着音频走（见 sayWithVoice）
       void sayWithVoice(petId, generated.text, generated.image);
       // 同一份文本随返回值带出（叶子由 sayWithVoice 写，不是二选一）

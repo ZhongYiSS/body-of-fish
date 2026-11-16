@@ -106,6 +106,27 @@ async function postEarPhase(phase) {
     appendEvent('ear-phase-error', e && e.message ? e.message : String(e));
   }
 }
+/**
+ * 报告的当前状态 + 心跳续命。
+ * 【汐儿 · 11-16 晚 m24151】宿主那边的状态只有 45 秒有效期（防脚本崩了状态挂死），
+ * 但哥哥可能按住说一分钟，所以这里每 8 秒重报一次当前状态，直到回 idle。
+ */
+let earPhaseNow = 'idle';
+let earHeartbeat = null;
+function reportEarPhase(phase) {
+  earPhaseNow = phase;
+  void postEarPhase(phase);
+  if (earHeartbeat !== null) {
+    clearInterval(earHeartbeat);
+    earHeartbeat = null;
+  }
+  if (phase !== 'idle') {
+    earHeartbeat = setInterval(() => {
+      if (earPhaseNow !== 'idle') void postEarPhase(earPhaseNow);
+    }, 8000);
+    if (typeof earHeartbeat.unref === 'function') earHeartbeat.unref();
+  }
+}
 function handleLine(line) {
   const text = String(line || '').trim();
   if (!text) return;
@@ -124,22 +145,22 @@ function handleLine(line) {
   }
   if (event.event === 'rec-start') {
     log('开始录 ' + (event.file || ''));
-    void postEarPhase('listen');
+    reportEarPhase('listen');
     return;
   }
   if (event.event === 'text') {
     log('听到：' + event.text);
-    void postEarPhase('think');
+    reportEarPhase('think');
     return;
   }
   if (event.event === 'reply') {
     log('回：' + event.text);
-    void postEarPhase('idle');
+    reportEarPhase('idle');
     return;
   }
   if (event.event === 'error') {
     log('出错：' + (event.message || ''));
-    void postEarPhase('idle');
+    reportEarPhase('idle');
   }
 }
 

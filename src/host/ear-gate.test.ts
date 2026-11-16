@@ -50,7 +50,7 @@ describe('在听 / 在想：三个状态都要落到提示层', () => {
   });
 
   test('状态有兜底失效，不会因为脚本崩了永久挂着', () => {
-    assert.match(hostCode, /const EAR_PHASE_TTL_MS = 120_000;/);
+    assert.match(hostCode, /const EAR_PHASE_TTL_MS = 45_000;/, '45 秒（11-16 晚收短，原来两分钟太长）');
     assert.match(hostCode, /earPhaseAt > EAR_PHASE_TTL_MS/);
   });
 
@@ -63,17 +63,21 @@ describe('在听 / 在想：三个状态都要落到提示层', () => {
   test('壳把 rec-start / text / reply / error 翻成 listen / think / idle', () => {
     assert.match(earCode, /async function postEarPhase\(phase\)/);
     assert.match(earCode, /await fetch\(petBase\(\) \+ '\/ear'/);
+    assert.equal(earCode.split("reportEarPhase('listen');").length - 1, 1, '录音开始要报一次 listen');
+    assert.equal(earCode.split("reportEarPhase('think');").length - 1, 1, '出字要报一次 think');
     assert.equal(
-      earCode.split("void postEarPhase('listen');").length - 1,
-      1,
-      '录音开始要报一次 listen',
-    );
-    assert.equal(earCode.split("void postEarPhase('think');").length - 1, 1, '出字要报一次 think');
-    assert.equal(
-      earCode.split("void postEarPhase('idle');").length - 1,
+      earCode.split("reportEarPhase('idle');").length - 1,
       2,
       'reply 和 error 各要撤一次',
     );
+  });
+
+  test('长按说话时心跳续命，状态不会半路失效', () => {
+    // 宿主那边只有 45 秒有效期（防脚本崩了状态挂死），按住说一分钟就得定时重报。
+    assert.match(earCode, /let earPhaseNow = 'idle';/);
+    assert.match(earCode, /earHeartbeat = setInterval\(\(\) => \{/);
+    assert.match(earCode, /\}, 8000\);/);
+    assert.match(earCode, /clearInterval\(earHeartbeat\);/);
   });
 });
 
@@ -95,6 +99,32 @@ describe('在听 / 在想：别的声音和气泡让路', () => {
     );
     assert.match(hostCode, /if \(earMuted\(\) && \(req\.priority \?\? 'normal'\) !== 'urgent'\)/);
     assert.match(hostCode, /if \(earMuted\(\) && \(req\.priority \?\? 'urgent'\) !== 'urgent'\)/);
+  });
+
+  test('进入在听 / 在想时收掉头顶气泡（别跟提示层重复）', () => {
+    // 哥哥 m24151：头顶气泡（听.py 自己写的「我在听…」60 秒）+ 提示层的【在听】同时挂着。
+    const start = hostCode.indexOf('const setEarPhase = (phase: EarPhase): void => {');
+    assert.ok(start >= 0, '没找到 setEarPhase');
+    const body = hostCode.slice(start, start + 900);
+    assert.match(body, /if \(phase !== 'idle'\) \{/);
+    assert.match(body, /state\.writePet\('main', 'say', \{ clear: true \}\);/);
+  });
+
+  test('回话之前必须先撤状态（否则自己的闸把回话挡住 = 死锁）', () => {
+    // 哥哥 m24151：一直【在想】、话说不出来。根因就是 chatWithPet 的回复走 normal，
+    // 被 earMuted() 挡成 ear-busy → show() 不执行 → idle 永远不到。
+    const at = hostCode.indexOf("void sayWithVoice(petId, generated.text, generated.image);");
+    assert.ok(at > 0, '没找到对话回话的 sayWithVoice');
+    const before = hostCode.slice(Math.max(0, at - 600), at);
+    assert.match(before, /setEarPhase\('idle'\);/, '回话前没撤 ear 状态');
+    assert.match(before, /dropHint\('think'\);/);
+  });
+
+  test('手按「看一眼」也要先撤状态', () => {
+    const at = hostCode.indexOf('const lookOnce = async (');
+    assert.ok(at > 0, '没找到 lookOnce');
+    const body = hostCode.slice(at, at + 700);
+    assert.match(body, /setEarPhase\('idle'\);/);
   });
 
   test('录音时不写说话气泡、不收第三方气泡', () => {
