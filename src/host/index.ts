@@ -228,6 +228,8 @@ import { searchWeb, wikiLine } from './web-search';
 import { createSubtitleBook } from './bili-subtitle';
 import { createStoryCache } from './bili-story';
 import { createSearchRunner, failedNote, parseToolCall, SEARCH_TOOL_HINT } from './chat-search';
+import { pruneDir } from './retention';
+import { readTailLines } from './log-tail';
 import { playbackWatchdogMs, systemPlayerCommand } from './core/sound-player';
 import { createLyricAgent } from './lyric-agent';
 import {
@@ -1737,21 +1739,16 @@ export function apply(ctx: any): void {
       return '';
     }
   };
-  /** 哥哥 11-09 晚 m16721：「留一天吧」。截图只当调试用，24 小时后自己删；笔记 jsonl 不动（那是文字）。 */
-  const WATCH_SHEET_KEEP_MS = 24 * 60 * 60 * 1000;
+  /** 哥哥 11-09 晚 m16721「留一天吧」；11-16 体检补上总量上限：一天真能攒到 279MB / 235 张。
+   *  规则在 ./retention（先按 24 小时、再按 200MB，从最老的删，永远留最新 20 张）。 */
   const pruneWatchSheets = async (): Promise<void> => {
-    try {
-      const names = await readdir(watchSheetDir);
-      const cutoff = Date.now() - WATCH_SHEET_KEEP_MS;
-      for (const name of names) {
-        if (!name.endsWith('.png')) continue;
-        const full = join(watchSheetDir, name);
-        const info = await stat(full).catch(() => null);
-        if (info && info.mtimeMs < cutoff) await unlink(full).catch(() => {});
-      }
-    } catch {
-      /* 目录还没有，或别人正在看，都无所谓 */
-    }
+    await pruneDir(watchSheetDir, {
+      now: Date.now(),
+      keepDays: 1,
+      maxBytes: 200 * 1024 * 1024,
+      ext: '.png',
+      log: (line) => console.log(line),
+    });
   };
   const watchSheet = async (png: Buffer, meta: WatchSheetMeta): Promise<void> => {
     const eyes = servicesProvider('main').eyes.available();
@@ -3639,6 +3636,14 @@ export function apply(ctx: any): void {
     void storyCache.cleanup().then((removed) => {
       if (removed > 0) console.log('[剧情] 清掉过期文件 ' + String(removed) + ' 个');
     }).catch(() => {});
+    // 陪伴笔记（每日 jsonl）：保留 30 天 / 总量 20MB。以前完全不删，开着陪伴就一直涨。
+    void pruneDir(watchLogDir, {
+      now: Date.now(),
+      keepDays: 30,
+      maxBytes: 20 * 1024 * 1024,
+      ext: '.jsonl',
+      log: (line) => console.log(line),
+    }).catch(() => {});
     return () => {
       clearInterval(timer);
       clearInterval(autoTimer);
@@ -4375,8 +4380,9 @@ export function apply(ctx: any): void {
       const day = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
       const file = join(userRoot, 'logs', '陪伴', `${day}.jsonl`);
       try {
-        const raw = await readFile(file, 'utf8');
-        const rows = raw.split('\n').filter((line) => line.trim() !== '').slice(-20).map((line) => {
+        // 只读尾部 20 行：陪伴开一整天，当天的 jsonl 可以很长，没必要整份进内存。
+        const lines = await readTailLines(file, 20);
+        const rows = lines.map((line) => {
           try {
             return JSON.parse(line) as Record<string, unknown>;
           } catch {
