@@ -148,6 +148,13 @@ function handleLine(line) {
     reportEarPhase('listen');
     return;
   }
+  if (event.event === 'rec-stop') {
+    // 【汐儿 · 11-16 晚 m24332】哥哥按停之后要立刻从【在听】变【在想】。
+    // 以前只有 ASR 出字（text）才切，中间那几秒一直挂在【在听】。
+    log('停止录音，等她出字');
+    reportEarPhase('think');
+    return;
+  }
   if (event.event === 'text') {
     log('听到：' + event.text);
     reportEarPhase('think');

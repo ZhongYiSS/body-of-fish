@@ -2640,11 +2640,12 @@ export function apply(ctx: any): void {
     petId: string,
     source: 'chat' | 'companion',
     payload: { text: string; image?: string; duration?: number; imageDuration?: number },
+    force = false,
   ): void => {
     // 【汐儿 · 11-16 晚】闸口要和声音一致：声音是「在听 + 在想」都让路（earMuted），
     // 气泡以前只挡「在听」（earQuiet）——于是她想事的时候，别处的字还会跳出来。
     // 她自己那句回话不受影响：写气泡之前已经 setEarPhase('idle') 了。
-    if (earMuted()) return;
+    if (!force && earMuted()) return;
     if (source === 'companion') {
       void servicesProvider('main')
         .bubble.say({ petId, text: payload.text, duration: payload.duration, source: 'companion' })
@@ -4118,6 +4119,10 @@ export function apply(ctx: any): void {
       touchUser();
       // 从「收到话」到「开口」之间是空窗（模型要几秒）：先挂【在想】，开口那一刻撤（见 runSpeakTextInner）
       setEarPhase('think');
+      // 【汐儿 · 11-16 晚 m24332】按停麦之后头顶要马上有反应，别等 ASR + 生成 + 合成走完：
+      // 先占一行「让我想想…」（8 秒自然过期，真实回复开口时会被顶掉）。force 是绕过耳闸——
+      // 这会儿状态正是 think，不绕过就写不出去。
+      writeSayBubble(petId, 'chat', { text: '让我想想…', duration: 8000 }, true);
       const cfg = readAllConfig(configPaths);
       const found = findPetInstance(cfg, petId);
       // 宠物在"校验那次读"与这里之间被删了——本函数还要先排 withMemoryLock 的串行队列（等前一次生成

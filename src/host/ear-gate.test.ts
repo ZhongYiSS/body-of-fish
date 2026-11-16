@@ -67,7 +67,8 @@ describe('在听 / 在想：三个状态都要落到提示层', () => {
     assert.match(earCode, /async function postEarPhase\(phase\)/);
     assert.match(earCode, /await fetch\(petBase\(\) \+ '\/ear'/);
     assert.equal(earCode.split("reportEarPhase('listen');").length - 1, 1, '录音开始要报一次 listen');
-    assert.equal(earCode.split("reportEarPhase('think');").length - 1, 1, '出字要报一次 think');
+    // 11-16 晚 m24332：按停麦就报 think（rec-stop），出字再报一次 → 两次。
+    assert.equal(earCode.split("reportEarPhase('think');").length - 1, 2, '按停 + 出字各报一次 think');
     // 11-16 晚第二轮自查：除了 reply / error，脚本进程自己退出或报错也要撤（4 次）——
     // 不撤的话心跳会一直替它喊「在听」，宿主 45 秒兜底永远等不到，就成永久闭嘴。
     assert.equal(
@@ -75,6 +76,15 @@ describe('在听 / 在想：三个状态都要落到提示层', () => {
       4,
       'reply、error、进程退出、进程报错各撤一次',
     );
+  });
+
+  test('按停麦就切【在想】（不等 ASR 出字）', () => {
+    // 哥哥 m24332：点停止之后再点一次，【在听】要马上变【在想】。
+    // 听.py 现在按停就 emit rec-stop，壳把它翻成 think。
+    assert.match(earCode, /event\.event === 'rec-stop'/);
+    const at = earCode.indexOf("event.event === 'rec-stop'");
+    const body = earCode.slice(at, at + 260);
+    assert.match(body, /reportEarPhase\('think'\)/);
   });
 
   test('长按说话时心跳续命，状态不会半路失效', () => {
@@ -144,7 +154,8 @@ describe('在听 / 在想：别的声音和气泡让路', () => {
   test('在听/在想时不写说话气泡、不收第三方气泡', () => {
     // 11-16 晚第二轮自查：气泡闸以前只挡「在听」（earQuiet），她思考时别处的字还会跳出来；
     // 现在气泡和声音用同一个口径（earMuted），earQuiet 直接删掉。
-    assert.match(hostCode, /if \(earMuted\(\)\) return;/);
+    // 11-16 晚 m24332：她自己的「让我想想…」占位要能写出去（那时正是 think），所以留了 force 例外。
+    assert.match(hostCode, /if \(!force && earMuted\(\)\) return;/);
     assert.match(hostCode, /\{ ok: false, reason: 'ear-busy' \}/);
     assert.ok(!hostCode.includes('earQuiet'), 'earQuiet 应该已经删干净');
   });
