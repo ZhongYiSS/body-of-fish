@@ -2609,8 +2609,14 @@ export function apply(ctx: any): void {
    * 收短到 45 秒，另由 ear.js 每 8 秒心跳续命（长按说话也不会中途掉状态）。
    */
   const EAR_PHASE_TTL_MS = 45_000;
-  const earPhaseNow = (): EarPhase =>
-    earPhase !== 'idle' && Date.now() - earPhaseAt > EAR_PHASE_TTL_MS ? 'idle' : earPhase;
+  const earPhaseNow = (): EarPhase => {
+    if (earPhase === 'idle') return 'idle';
+    if (Date.now() - earPhaseAt <= EAR_PHASE_TTL_MS) return earPhase;
+    // 超时了：状态要失效，提示层那行也得跟着走，不然【在听】会挂到天荒地老。
+    earPhase = 'idle';
+    dropHint('ear');
+    return 'idle';
+  };
   const setEarPhase = (phase: EarPhase): void => {
     earPhase = phase;
     earPhaseAt = Date.now();
@@ -2630,15 +2636,15 @@ export function apply(ctx: any): void {
   };
   /** 在听或在想：别的声音让路（manual/urgent 例外） */
   const earMuted = (): boolean => earPhaseNow() !== 'idle';
-  /** 正在录音：连气泡也不许跳出来抢「我在听…」那一条 */
-  const earQuiet = (): boolean => earPhaseNow() === 'listen';
   const writeSayBubble = (
     petId: string,
     source: 'chat' | 'companion',
     payload: { text: string; image?: string; duration?: number; imageDuration?: number },
   ): void => {
-    // 哥哥正在说话：气泡不许跳出来抢（他自己手动的 urgent 走 centerPlayClip，不经过这里）
-    if (earQuiet()) return;
+    // 【汐儿 · 11-16 晚】闸口要和声音一致：声音是「在听 + 在想」都让路（earMuted），
+    // 气泡以前只挡「在听」（earQuiet）——于是她想事的时候，别处的字还会跳出来。
+    // 她自己那句回话不受影响：写气泡之前已经 setEarPhase('idle') 了。
+    if (earMuted()) return;
     if (source === 'companion') {
       void servicesProvider('main')
         .bubble.say({ petId, text: payload.text, duration: payload.duration, source: 'companion' })
@@ -2821,7 +2827,7 @@ export function apply(ctx: any): void {
   // ===================== 嗓子仲裁（哥哥 11-15 定；纯函数在 core/speak-center.ts） =====================
   // 五条出声路径全部归到这里：对话 / 陪伴 / 一眼看 / 碎碎念 / 菜单说一句 / 桥的 say-loud。
   // ① 同一时刻只有一条在响；② 手动动作是 urgent：掐掉正在播的、清空队列；
-  // ③ 排队超过 12 秒作废；④ 每条 job 有上限（音频时长+5s，不知道时长按字数估，封顶 60s）；
+  // ③ 排队超过 SPEAK_EXPIRE_MS（15 秒，设置页「排队过期」可调）作废；④ 每条 job 有上限（音频时长+5s，不知道时长按字数估，封顶 60s）；
   // ⑤ 语音 + 气泡 + 表情包是同一个 job，一起排队、一起收尾。
   interface SpeakOutcome {
     ok: boolean;
@@ -4111,7 +4117,7 @@ export function apply(ctx: any): void {
     withMemoryLock(async () => {
       touchUser();
       // 从「收到话」到「开口」之间是空窗（模型要几秒）：先挂【在想】，开口那一刻撤（见 runSpeakTextInner）
-      pushHint('think', '【在想】', 'task', 180_000);
+      setEarPhase('think');
       const cfg = readAllConfig(configPaths);
       const found = findPetInstance(cfg, petId);
       // 宠物在"校验那次读"与这里之间被删了——本函数还要先排 withMemoryLock 的串行队列（等前一次生成
@@ -4132,6 +4138,8 @@ export function apply(ctx: any): void {
             .bubble.say({ petId, text: '嗯嗯，本鱼听着，这就去问', duration: 2200 })
             .catch(() => null);
           dropHint('think');
+          // 状态也要一起撤：不撤的话接下来 45 秒里非 urgent 的声音全被挡（她自己也说不出来）
+          setEarPhase('idle');
           return { ok: true as const, text: '（已转给本鱼，等她回话）' };
         }
         // 11-03：DSH 没开 / 桥插件没响应 → **降级自己答**，别把「DSH 那边没接住」丢给用户当错误。
@@ -4166,6 +4174,8 @@ export function apply(ctx: any): void {
       let generated = await ask(system);
       if (!generated.ok) {
         dropHint('think');
+        // 生成失败也要撤 ear 状态，否则接下来 45 秒里她一句都说不出来
+        setEarPhase('idle');
         return generated;
       }
       // 她点名要查：搜一次（2 秒封顶），把资料塞回去请她用自己的话答。最多查一轮，防死循环。
@@ -4951,6 +4961,12 @@ export function apply(ctx: any): void {
       const found = findPetInstance(readAllConfig(configPaths), petId);
       if (!found) return { kind: 'json', status: 404, obj: { error: `unknown pet: ${petId}` } };
       touchUser();
+      // 【汐儿 · 11-16 晚 m24151】桥推来的朗读是「外面的声音」，在听 / 在想时让路——
+      // 不然哥哥正说着话，桥那边自顾自念起来。回 skipped 让调用方知道是被让路，不是出错。
+      if (earMuted()) {
+        logSayLoud('在听/在想，这条让路');
+        return { kind: 'json', status: 200, obj: { ok: true, skipped: true, reason: 'ear-busy' } };
+      }
       logSayLoud(`收到 ${text.length} 字 → 念 ${clipped.length} 字：${clipped.slice(0, 40)}`);
       // servicesProvider 里已经做了 fillCloudBackend（云端留空 → 沿用 AI 设置那一份）
       const services = servicesProvider(petId);
@@ -5621,7 +5637,7 @@ export function apply(ctx: any): void {
         return { kind: 'json', status: 400, obj: { error: 'invalid JSON body' } };
       }
       const o = parsed && typeof parsed === 'object' ? (parsed as Record<string, unknown>) : {};
-      if (earQuiet()) return { kind: 'json', status: 200, obj: { ok: false, reason: 'ear-busy' } };
+      if (earMuted()) return { kind: 'json', status: 200, obj: { ok: false, reason: 'ear-busy' } };
       // 判定 + 门禁 + 写叶子全在 core（唯一实现）；这里只负责把请求翻成 SayInput、回状态码。
       return {
         kind: 'json',

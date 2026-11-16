@@ -201,10 +201,16 @@ function ensureDaemon() {
     const text = String(chunk || '').trim();
     if (text) log('stderr: ' + text.slice(0, 400));
   });
-  proc.on('error', (e) => log('进程错误：' + (e && e.message ? e.message : String(e))));
+  // 【汐儿 · 11-16 晚】脚本一死就把状态撤干净：心跳是每 8 秒重报一次，
+  // 不在这里停掉的话，它会一直报「在听」，宿主那边的 45 秒兜底永远等不到 —— 变成永久闭嘴。
+  proc.on('error', (e) => {
+    log('进程错误：' + (e && e.message ? e.message : String(e)));
+    reportEarPhase('idle');
+  });
   proc.on('exit', (code) => {
     appendEvent('exit', 'code=' + code);
     log('进程退出 code=' + code + '（下次按热键会重新拉起）');
+    reportEarPhase('idle');
     if (child === proc) child = null;
   });
   appendEvent('spawn', 'pid=' + proc.pid);

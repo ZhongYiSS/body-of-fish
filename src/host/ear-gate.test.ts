@@ -51,7 +51,10 @@ describe('在听 / 在想：三个状态都要落到提示层', () => {
 
   test('状态有兜底失效，不会因为脚本崩了永久挂着', () => {
     assert.match(hostCode, /const EAR_PHASE_TTL_MS = 45_000;/, '45 秒（11-16 晚收短，原来两分钟太长）');
-    assert.match(hostCode, /earPhaseAt > EAR_PHASE_TTL_MS/);
+    // 11-16 晚：超时不仅「算成 idle」，还得把提示层那行摘掉、状态真的归零，
+    // 否则【在听】会挂到天荒地老（哥哥 m24151）。
+    assert.match(hostCode, /Date\.now\(\) - earPhaseAt <= EAR_PHASE_TTL_MS/);
+    assert.match(hostCode, /earPhase = 'idle';\n    dropHint\('ear'\);/);
   });
 
   test('POST /ear 把 phase 收下来', () => {
@@ -65,10 +68,12 @@ describe('在听 / 在想：三个状态都要落到提示层', () => {
     assert.match(earCode, /await fetch\(petBase\(\) \+ '\/ear'/);
     assert.equal(earCode.split("reportEarPhase('listen');").length - 1, 1, '录音开始要报一次 listen');
     assert.equal(earCode.split("reportEarPhase('think');").length - 1, 1, '出字要报一次 think');
+    // 11-16 晚第二轮自查：除了 reply / error，脚本进程自己退出或报错也要撤（4 次）——
+    // 不撤的话心跳会一直替它喊「在听」，宿主 45 秒兜底永远等不到，就成永久闭嘴。
     assert.equal(
       earCode.split("reportEarPhase('idle');").length - 1,
-      2,
-      'reply 和 error 各要撤一次',
+      4,
+      'reply、error、进程退出、进程报错各撤一次',
     );
   });
 
@@ -83,7 +88,10 @@ describe('在听 / 在想：三个状态都要落到提示层', () => {
 
 describe('在听 / 在想：别的声音和气泡让路', () => {
   test('生成期间挂【在想】，开口那一刻撤', () => {
-    assert.match(hostCode, /pushHint\('think', '【在想】', 'task', 180_000\);/);
+    // 11-16 晚第二轮自查：以前 chatWithPet 自己 push 一行【在想】、setEarPhase 又推一行 → 屏幕上两行一样的。
+    // 现在只由 ear 状态那一条通道出提示。
+    assert.match(hostCode, /setEarPhase\('think'\);/);
+    assert.ok(!hostCode.includes("pushHint('think', '【在想】', 'task', 180_000)"), '旧的 180 秒提示不该还在');
     assert.match(
       hostCode,
       /dropHint\('think'\);[\s\S]{0,200}setEarPhase\('idle'\);/,
@@ -92,10 +100,16 @@ describe('在听 / 在想：别的声音和气泡让路', () => {
   });
 
   test('centerSay / centerPlayClip 对非 urgent 让路', () => {
+    // 11-16 晚：闸口现在是三处 —— centerSay、centerPlayClip，以及给外面推来的 /say-loud
+    // （桥那边一律 urgent，不挡就是「在听时别人插嘴」）。（writeSayBubble 是静默 return，不带 message。）
     assert.equal(
       hostCode.split("message: 'ear-busy'").length - 1,
       2,
-      'centerSay 与 centerPlayClip 各一道闸（writeSayBubble 是静默 return）',
+      'centerSay 与 centerPlayClip 各一道闸（这两条是 Promise 返回值，用 message）',
+    );
+    assert.ok(
+      hostCode.split("reason: 'ear-busy'").length - 1 >= 2,
+      '/say-loud 与 /broadcast 这两条 HTTP 路由用 reason 回 ear-busy',
     );
     assert.match(hostCode, /if \(earMuted\(\) && \(req\.priority \?\? 'normal'\) !== 'urgent'\)/);
     assert.match(hostCode, /if \(earMuted\(\) && \(req\.priority \?\? 'urgent'\) !== 'urgent'\)/);
@@ -127,8 +141,11 @@ describe('在听 / 在想：别的声音和气泡让路', () => {
     assert.match(body, /setEarPhase\('idle'\);/);
   });
 
-  test('录音时不写说话气泡、不收第三方气泡', () => {
-    assert.match(hostCode, /if \(earQuiet\(\)\) return;/);
+  test('在听/在想时不写说话气泡、不收第三方气泡', () => {
+    // 11-16 晚第二轮自查：气泡闸以前只挡「在听」（earQuiet），她思考时别处的字还会跳出来；
+    // 现在气泡和声音用同一个口径（earMuted），earQuiet 直接删掉。
+    assert.match(hostCode, /if \(earMuted\(\)\) return;/);
     assert.match(hostCode, /\{ ok: false, reason: 'ear-busy' \}/);
+    assert.ok(!hostCode.includes('earQuiet'), 'earQuiet 应该已经删干净');
   });
 });
