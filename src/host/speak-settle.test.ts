@@ -78,3 +78,41 @@ describe('嗓子仲裁中心：任务离队都要兑现 Promise', () => {
     assert.match(body, /for \(const job of speakQueue\) dropSpeakJob\(/, '打断清队列时没兑现排队任务');
   });
 });
+/**
+ * 声音与气泡「同一个起点」契约（11-16 晚，哥哥报「声音和气泡配合不默契」）。
+ *
+ * 三个硬规矩：
+ * ① 陪伴的气泡不能在合成之前就冒 —— 先记账，等音频真的开始由 runSpeakClip 写；
+ * ② 陪伴合成失败 = 只会冒字，这时必须把记下的那句话写出来（改时序不能把字弄丢）；
+ * ③ 合成超过 400 毫秒还没出声，先冒一行「让我想想…」，正式气泡一出现就把它作废。
+ */
+describe('声音与气泡：同一个起点', () => {
+  test('陪伴的气泡先记账，播放开始才写', () => {
+    assert.ok(
+      hostCode.includes("companionPending = opts?.image ? { text, image: opts.image } : { text };"),
+      '陪伴不再记账 —— 气泡又会在合成前冒出来',
+    );
+    assert.ok(hostCode.includes("text: '让我想想…'"), '少了合成慢时的占位气泡');
+    assert.ok(hostCode.includes('}, 400);'), '占位气泡的 400 毫秒守卫不见了');
+  });
+
+  test('clip 在播放开始时写气泡（陪伴不再只有声音没有字）', () => {
+    assert.ok(hostCode.includes('spec.bubbleText'), 'runSpeakClip 没有用 bubbleText 写气泡');
+    assert.ok(hostCode.includes('clip-write pet='), 'clip 写气泡没有留痕，出问题查不到');
+    assert.match(hostCode, /audioMs \?\?/, 'clip 气泡时长应该优先用 audioMs，别拿 0 算');
+  });
+
+  test('陪伴合成失败要把字写出来（不能有改时序后的「连字都没了」）', () => {
+    assert.ok(hostCode.includes('speak-failed pet=main'), '合成失败时没有兜底冒泡');
+  });
+
+  test('陪伴 play 把刚说的那句话带进 clip', () => {
+    assert.ok(hostCode.includes('bubbleText: pending.text'), 'play 没把文本传给中心');
+    assert.ok(hostCode.includes('bubbleImage: pending.image'), '表情包没跟着气泡走');
+  });
+
+  test('正式气泡一出现就作废占位', () => {
+    assert.ok(hostCode.includes('sayPlaceholderDone = true;'), '正式气泡出现时没有作废占位');
+    assert.ok(hostCode.includes('armSayPlaceholder();'), '没有装占位定时器');
+  });
+});

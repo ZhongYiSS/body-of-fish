@@ -1315,6 +1315,9 @@ export function apply(ctx: any): void {
       if (!chatModelReady()) return { ok: false, message: '未接入聊天模型' };
       // 嗓子/识图没接时**静默降级**：不出声、不截图说话，绝不冒一条报错气泡（哥哥 10-30 定）。
       const voiceReady = servicesProvider('main').voice.available().ready;
+      // 【汐儿 · 11-16】陪伴到底会不会出声 = 嗓子就绪 + 她自己那个开关没关。
+      // 不出声时必须立刻冒气泡（否则会等一个永远不会来的 play，字就没了）。
+      const companionSpeaks = voiceReady && raw.voice !== false;
       companion = createCompanion({
         config: {
           ...(intervalMs !== undefined ? { intervalMs } : {}),
@@ -1409,7 +1412,35 @@ export function apply(ctx: any): void {
           }
         },
         bubble: async (text, opts) => {
-          await servicesProvider('main').bubble.say({ petId: 'main', text, ...(opts?.image ? { image: opts.image } : {}) });
+          // 【汐儿 · 11-16】不再「先冒泡再说」：记下这句话，等音频真的开始由 runSpeakClip 写，
+          // 气泡和声音同一个起点。合成慢就 400 毫秒后先冒一行占位，真出声时被正式气泡盖掉。
+          if (!companionSpeaks) {
+            await servicesProvider('main').bubble.say({ petId: 'main', text, ...(opts?.image ? { image: opts.image } : {}) });
+            return;
+          }
+          companionPending = opts?.image ? { text, image: opts.image } : { text };
+          clearCompanionPlaceholder();
+          companionPlaceholder = setTimeout(() => {
+            companionPlaceholder = null;
+            if (companionPending === null) return;
+            writeSayBubble('main', 'companion', { text: '让我想想…', duration: 8000 });
+            noteBubble(`placeholder pet=main src=companion chars=${companionPending.text.length}`);
+          }, 400);
+          companionPlaceholder.unref?.();
+          // 兜底：play 一直没来（被跳过 / 被顶掉 / 生成中途换拍），1.5 秒后把真话写出来
+          companionFlush = setTimeout(() => {
+            companionFlush = null;
+            if (companionPending === null) return;
+            const lost = companionPending;
+            companionPending = null;
+            writeSayBubble(
+              'main',
+              'companion',
+              lost.image === undefined ? { text: lost.text } : { text: lost.text, image: lost.image },
+            );
+            noteBubble(`flush-no-play pet=main chars=${lost.text.length}`);
+          }, 1500);
+          companionFlush.unref?.();
         },
         // 只有嗓子真的就绪才注入：没接嗓子 = 完全不出声，而不是每拍都试一次、留一串失败日志。
         // 注入时也不吞错——companion 自己会 catch 并只记日志，不会再冒第二条报错气泡。
@@ -1417,10 +1448,52 @@ export function apply(ctx: any): void {
         // 打包后的进程 PATH 里没有它 → 合成成功却一声不响（哥哥报的「陪伴没声音」就是这个）。
         ...(voiceReady
           ? {
-              speak: async (text: string) => (await servicesProvider('main').voice.speak({ text })).audio,
+              speak: async (text: string) => {
+                try {
+                  return (await servicesProvider('main').voice.speak({ text })).audio;
+                } catch (error) {
+                  // 合成失败 = 只会冒字：把记下的那句话写出来，别因为改时序把字也弄丢
+                  if (companionPending !== null) {
+                    const lost = companionPending;
+                    companionPending = null;
+                    clearCompanionPlaceholder();
+                    writeSayBubble(
+                      'main',
+                      'companion',
+                      lost.image === undefined ? { text: lost.text } : { text: lost.text, image: lost.image },
+                    );
+                    noteBubble(`speak-failed pet=main chars=${lost.text.length}`);
+                  }
+                  throw error;
+                }
+              },
               play: async (audio: Uint8Array) => {
                 // 【汐儿 · 11-15】陪伴的自动出声也走仲裁：跟对话/碎碎念排同一条队，不再自己开播放器。
-                await centerPlayClip({ audio, mime: 'audio/wav', text: '（陪伴）', priority: 'low' });
+                // 【汐儿 · 11-16】气泡交给 runSpeakClip 在播放开始时写（这里把刚记下的那句话带过去）。
+                const pending = companionPending;
+                companionPending = null;
+                clearCompanionPlaceholder();
+                const flushPending = (): void => {
+                  if (pending === null) return;
+                  writeSayBubble(
+                    'main',
+                    'companion',
+                    pending.image === undefined ? { text: pending.text } : { text: pending.text, image: pending.image },
+                  );
+                  noteBubble(`play-failed pet=main chars=${pending.text.length}`);
+                };
+                await centerPlayClip({
+                  audio,
+                  mime: 'audio/wav',
+                  text: pending === null ? '（陪伴）' : pending.text,
+                  priority: 'low',
+                  ...(pending === null ? {} : { bubbleText: pending.text }),
+                  ...(pending === null || pending.image === undefined ? {} : { bubbleImage: pending.image }),
+                }).catch((error: unknown) => {
+                  // 播放这条路出错 = 只会冒字，把字补上；错误照旧往外抛（companion 自己会记日志）
+                  flushPending();
+                  throw error;
+                });
                 debugTrace('[companion] 出声完成 ' + audio.length + ' 字节');
               },
             }
@@ -2274,6 +2347,22 @@ export function apply(ctx: any): void {
   let activePlay: { child: { kill: () => void }; startedAtMs: number; budgetMs: number } | null = null;
   /** 现在挂在屏幕上的那句气泡是谁写的（打断时要跟着收掉，别「没声音了字还挂着」）。 */
   let bubbleOwner: { petId: string; source: 'chat' | 'companion' } | null = null;
+  /** 陪伴刚说出口、还没真正出声的那句话（等 runSpeakClip 播放开始时写气泡） */
+  let companionPending: { text: string; image?: string } | null = null;
+  /** 合成慢时先冒「让我想想…」的定时器 */
+  let companionPlaceholder: ReturnType<typeof setTimeout> | null = null;
+  /** 兜底：1.5 秒还没等到 play，就把真话写出来（宁可晚一点，也不能没字） */
+  let companionFlush: ReturnType<typeof setTimeout> | null = null;
+  const clearCompanionPlaceholder = (): void => {
+    if (companionPlaceholder !== null) {
+      clearTimeout(companionPlaceholder);
+      companionPlaceholder = null;
+    }
+    if (companionFlush !== null) {
+      clearTimeout(companionFlush);
+      companionFlush = null;
+    }
+  };
   /** 立刻闭嘴：kill 正在播的那条 + 收掉它写的气泡（队列由 centerInterrupt 清）。 */
   const stopLoud = (bump = true): void => {
     if (bump) epoch += 1;
@@ -2593,6 +2682,25 @@ export function apply(ctx: any): void {
       };
       return (await attempt()) ?? (await attempt());
     };
+    // 【汐儿 · 11-16】合成通常要 1.5~2.5 秒，这段时间一个字都没有。
+    // 400 毫秒还没出声就先冒一行占位，真出声时被正式气泡盖掉；快回复根本看不到它。
+    let sayPlaceholderTimer: ReturnType<typeof setTimeout> | undefined;
+    let sayPlaceholderDone = false;
+    const clearSayPlaceholder = (): void => {
+      if (sayPlaceholderTimer !== undefined) {
+        clearTimeout(sayPlaceholderTimer);
+        sayPlaceholderTimer = undefined;
+      }
+    };
+    const armSayPlaceholder = (): void => {
+      sayPlaceholderTimer = setTimeout(() => {
+        sayPlaceholderTimer = undefined;
+        if (sayPlaceholderDone || myEpoch !== epoch) return;
+        writeSayBubble(petId, source, { text: '让我想想…', duration: 8000 });
+        noteBubble(`placeholder pet=${petId} src=${source} chars=${text.length}`);
+      }, 400);
+      sayPlaceholderTimer.unref?.();
+    };
     // 【汐儿 · 11-15 23:20】串行合成、首句优先：并发会把嗓子堵死（实测首句等了 21.7 秒）。
     // 链上第一个就是第一句，后面排着队合成；念到哪、合成到哪，不抢。
     let synthChain: Promise<unknown> = Promise.resolve();
@@ -2611,7 +2719,9 @@ export function apply(ctx: any): void {
       }
       const line = sentences[i];
       const isLast = i === sentences.length - 1;
+      if (i === 0) armSayPlaceholder();
       const said = await jobs[i];
+      if (i === 0) clearSayPlaceholder();
       if (!said) {
         // 合成失败是「有气泡没声音」的头号嫌疑，必须留痕；剩下的字一次写出去。
         noteVoiceIssue(`synth-failed pet=${petId} src=${source} i=${i}/${sentences.length} say=${line.slice(0, 24)}`);
@@ -2635,6 +2745,8 @@ export function apply(ctx: any): void {
       const show = (): void => {
         if (shown) return;
         shown = true;
+        sayPlaceholderDone = true;
+        clearSayPlaceholder();
         if (myEpoch !== epoch) {
           noteBubble(`skip superseded epoch=${myEpoch} now=${epoch} i=${i}/${sentences.length} pet=${petId} src=${source} chars=${line.length}`);
           return;
@@ -2689,6 +2801,10 @@ export function apply(ctx: any): void {
     audioMs?: number;
     /** 播放真的开始时回调（写气泡） */
     onStart?: () => void;
+    /** clip 专用：播放开始时写进气泡的文字（陪伴的自动出声走这里，和声音同一个起点） */
+    bubbleText?: string;
+    /** clip 专用：气泡里一起显示的表情包 */
+    bubbleImage?: string;
     /** 真的开始出声：把保底闸换成「音频时长 + 3 秒」重新计 */
     onPlayStart?: (audioMs: number) => void;
     /** 新请求进来时把排着的、key 以此开头的旧请求踢掉（对话顶掉旧对话） */
@@ -2905,6 +3021,8 @@ export function apply(ctx: any): void {
     priority?: SpeakPriority;
     petId?: string;
     onStart?: () => void;
+    bubbleText?: string;
+    bubbleImage?: string;
   }): Promise<SpeakOutcome> => {
     const spec: SpeakSpec = {
       key: `clip:${++speakJobSeq}`,
@@ -2919,6 +3037,8 @@ export function apply(ctx: any): void {
       mime: req.mime,
       audioMs: audioDurationMs(req.audio),
       ...(req.onStart === undefined ? {} : { onStart: req.onStart }),
+      ...(req.bubbleText === undefined || req.bubbleText === '' ? {} : { bubbleText: req.bubbleText }),
+      ...(req.bubbleImage === undefined ? {} : { bubbleImage: req.bubbleImage }),
     };
     return enqueueSpeak(spec);
   };
@@ -2934,6 +3054,22 @@ export function apply(ctx: any): void {
         spec.onStart?.();
       } catch {
         /* 回调出错不该把播放搞挂 */
+      }
+      // 【汐儿 · 11-16】clip（陪伴的自动出声）以前只有声音没有字：
+      // 这里在「音频真的开始」这一刻写气泡，时长口径与对话那条一致（音频 + 2 秒尾巴）。
+      if (spec.bubbleText !== undefined && spec.bubbleText.trim() !== '') {
+        const clipMs = spec.audioMs ?? (spec.audio === undefined ? 0 : audioDurationMs(spec.audio));
+        const clipDur = Math.max(3000, clipMs + VOICE_TAIL_MS);
+        writeSayBubble(
+          spec.petId,
+          'companion',
+          spec.bubbleImage === undefined
+            ? { text: spec.bubbleText.trim(), duration: clipDur }
+            : { text: spec.bubbleText.trim(), image: spec.bubbleImage, duration: clipDur },
+        );
+        noteBubble(
+          `clip-write pet=${spec.petId} chars=${spec.bubbleText.trim().length} dur=${clipDur}ms image=${spec.bubbleImage ?? '-'}`,
+        );
       }
     };
     await playAudio(spec.audio, spec.mime, show, myEpoch);
