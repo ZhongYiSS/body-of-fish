@@ -1146,25 +1146,22 @@ describe('watch 段（陪伴节奏 / 是否出声）—— 用户层写了就要
     assert.equal(conf.fallbackSec, 120);
   });
 
-  test('四套提示词（游戏 / 视频 / 网页 / 聊天）都过白名单，坏值各自丢掉（哥哥 m19324）', () => {
+  test('老的四套提示词键已废弃：只留 prompt / detailPrompt（11-16 体检清残留）', () => {
     const paths = withBase({}, {
       watch: {
-        prompt: '游戏那份',
+        prompt: '这一套',
+        detailPrompt: '回看那套',
         promptVideo: '视频那份',
         promptWeb: '网页那份',
         promptChat: '聊天那份',
       },
     });
     const conf = readAllConfig(paths).main.watch as Record<string, unknown>;
-    assert.equal(conf.prompt, '游戏那份');
-    assert.equal(conf.promptVideo, '视频那份');
-    assert.equal(conf.promptWeb, '网页那份');
-    assert.equal(conf.promptChat, '聊天那份');
-
-    const bad = withBase({}, { watch: { promptVideo: 42, promptWeb: null, promptChat: { a: 1 } } });
-    const badConf = readAllConfig(bad).main.watch as Record<string, unknown> | undefined;
-    assert.equal(badConf?.promptVideo, undefined);
-    assert.equal(badConf?.promptChat, undefined);
+    assert.equal(conf.prompt, '这一套');
+    assert.equal(conf.detailPrompt, '回看那套');
+    assert.equal(conf.promptVideo, undefined);
+    assert.equal(conf.promptWeb, undefined);
+    assert.equal(conf.promptChat, undefined);
   });
 
   test('watch.tuning 非法值不炸：配置层原样收着，normalizeTuning 负责夹（坏 prompt 直接丢）', () => {    const paths = withBase({}, { watch: { tuning: { cutAbs: '高', paces: '三档' }, prompt: 42 } });

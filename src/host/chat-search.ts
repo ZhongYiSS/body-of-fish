@@ -47,7 +47,7 @@ export function parseToolCall(text: string): { query: string; rest: string } | n
 
 export interface ChatSearchDeps {
   /** 搜一次；默认就是 web-search 的 searchWeb（测试可替换） */
-  readonly search?: (query: string, timeoutMs: number) => Promise<SearchResult>;
+  readonly search?: (query: string, timeoutMs: number, signal?: AbortSignal) => Promise<SearchResult>;
   /** 搜一次的预算，默认 2000ms */
   readonly searchBudgetMs?: number;
   readonly now?: () => number;
@@ -73,6 +73,12 @@ export interface SearchRunner {
 
 const CACHE_MS = 10 * 60_000;
 const CACHE_MAX = 50;
+/**
+ * 【11-16 体检】搜失败也要记一笔：原来只缓存成功结果，于是「这句没查到」每次重问都要重新白等
+ * 两秒半（四家引擎串行跑，实际底层可能还在跑更久）。失败缓存 60 秒就够了——网络是一时的，
+ * 一分钟后再试不算浪费。
+ */
+const NEG_CACHE_MS = 60_000;
 const NOTE_MAX = 700;
 const HIT_TEXT_MAX = 90;
 
@@ -139,11 +145,11 @@ export function createSearchRunner(deps: ChatSearchDeps = {}): SearchRunner {
   const budgetMs = deps.searchBudgetMs ?? 2000;
   const search =
     deps.search ??
-    ((query: string, timeoutMs: number): Promise<SearchResult> =>
-      searchWeb(query, { timeoutMs }).catch(
+    ((query: string, timeoutMs: number, signal?: AbortSignal): Promise<SearchResult> =>
+      searchWeb(query, { timeoutMs, ...(signal === undefined ? {} : { signal }) }).catch(
         (): SearchResult => ({ ok: false, engine: 'none', query, hits: [], ms: 0, reason: 'thrown' }),
       ));
-  const cache = new Map<string, { at: number; result: SearchResult }>();
+  const cache = new Map<string, { at: number; ttl: number; result: SearchResult }>();
   const now = deps.now ?? (() => Date.now());
 
   return {
@@ -159,7 +165,7 @@ export function createSearchRunner(deps: ChatSearchDeps = {}): SearchRunner {
       }
 
       const cached = cache.get(clean);
-      if (cached !== undefined && now() - cached.at < CACHE_MS) {
+      if (cached !== undefined && now() - cached.at < cached.ttl) {
         const note = composeNote(clean, cached.result.hits);
         return {
           ok: note !== '',
@@ -172,8 +178,19 @@ export function createSearchRunner(deps: ChatSearchDeps = {}): SearchRunner {
         };
       }
 
-      const result = await withTimeout(search(clean, budgetMs), budgetMs + 500);
+      /**
+       * 【11-16 体检】预算到点连底层请求一起掐：以前只是「不要结果了」，
+       * fetch 还接着跑到自己的 6 秒上限，白花流量、还会和下一句抢带宽、抢 CPU。
+       */
+      const controller = new AbortController();
+      const result = await withTimeout(search(clean, budgetMs, controller.signal), budgetMs + 500);
       if (result === null) {
+        controller.abort();
+        cache.set(clean, {
+          at: now(),
+          ttl: NEG_CACHE_MS,
+          result: { ok: false, engine: 'none', query: clean, hits: [], ms: now() - started, reason: 'timeout' },
+        });
         return {
           ok: false,
           note: failedNote(),
@@ -186,6 +203,7 @@ export function createSearchRunner(deps: ChatSearchDeps = {}): SearchRunner {
         };
       }
       if (!result.ok || result.hits.length === 0) {
+        cache.set(clean, { at: now(), ttl: NEG_CACHE_MS, result });
         return {
           ok: false,
           note: failedNote(),
@@ -202,7 +220,7 @@ export function createSearchRunner(deps: ChatSearchDeps = {}): SearchRunner {
         const oldest = [...cache.entries()].sort((a, b) => a[1].at - b[1].at)[0];
         if (oldest !== undefined) cache.delete(oldest[0]);
       }
-      cache.set(clean, { at: now(), result });
+      cache.set(clean, { at: now(), ttl: CACHE_MS, result });
       const note = composeNote(clean, result.hits);
       return {
         ok: note !== '',

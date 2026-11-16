@@ -1653,7 +1653,6 @@ export function apply(ctx: any): void {
   const storySubtitleDir = join(watchSceneDir, '字幕');
   const storyTextDir = join(watchSceneDir, '剧情');
   /** 视频、网页模式只要单张（宫格太慢）；游戏维持单帧 + 六宫格 */
-  let preferSingleSheet = false;
   const storyCache = createStoryCache({
     subtitleDir: storySubtitleDir,
     storyDir: storyTextDir,

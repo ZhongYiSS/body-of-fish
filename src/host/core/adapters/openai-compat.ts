@@ -306,9 +306,20 @@ export async function compatVision(
    */
   const body = { model: backend.model, messages, temperature: 0.8, stream: false };
   if (options.onDelta) {
+    /**
+     * 【11-16 体检】流式中途断了**不能整段重来**：前面已经吐出去的字收不回来，
+     * 再问一遍会让同一次「看一眼」说两遍（气泡说完又重说），还白花一份合成钱。
+     * 已经吐过字就用已吐的收场；一个字都没吐（端点不支持流式 / 连不上）才退回整段请求。
+     */
+    let emitted = '';
+    const track = (chunk: string): void => {
+      emitted += chunk;
+      options.onDelta?.(chunk);
+    };
     try {
-      return await streamVision(backend, { ...body, reasoning_effort: 'none' }, options);
+      return await streamVision(backend, { ...body, reasoning_effort: 'none' }, { ...options, onDelta: track });
     } catch {
+      if (emitted.trim() !== '') return emitted;
       /* 流式不通（端点不支持 / 半路断）就退回下面的整段请求，最多多花一次 */
     }
   }

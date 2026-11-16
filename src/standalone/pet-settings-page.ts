@@ -274,7 +274,7 @@ export const petSettingsScript = `
   // 页面是一次提交，脚本替用户分两次写——任何一步失败都明确报出来，不假装"都保存好了"。
   // 游戏陪伴那一组（数字框统一按 number 收）
   const WATCH_NUMBERS = ['watchCutAbs', 'watchCutSpike', 'watchCutGapSec', 'watchIntegralLight',
-    'watchKeyGapSec', 'watchTalkGapSec', 'watchFallbackSec', 'watchCutWidth', 'watchCutHeight',
+    'watchTalkGapSec', 'watchFallbackSec',
     'watchStillWidth', 'watchStillHeight', 'watchCalmMinGapSec', 'watchCalmIntegralSec', 'watchCalmFloorSec',
     'watchNormalMinGapSec', 'watchNormalIntegralSec', 'watchNormalFloorSec',
     'watchDenseMinGapSec', 'watchDenseIntegralSec', 'watchDenseFloorSec'];
@@ -306,7 +306,7 @@ export const petSettingsScript = `
       const el = get(id); if (el) el.checked = data[id] === true;
     }
     // 陪伴：四套提示词留空 = 用默认；数字原样回填；默认值留着给「恢复这一栏」
-    for (const id of ['watchPrompt', 'watchPromptVideo', 'watchPromptWeb', 'watchPromptChat', 'watchDetailPrompt']) {
+    for (const id of ['watchPrompt', 'watchDetailPrompt']) {
       const el = get(id); if (el) el.value = typeof data[id] === 'string' ? data[id] : '';
     }
     for (const id of WATCH_NUMBERS) {
@@ -334,13 +334,9 @@ export const petSettingsScript = `
     if (mergeBox) mergeBox.checked = data.mergeLook !== false;
     const sess = get('subtitleSessData');
     if (sess) sess.value = typeof data.subtitleSessData === 'string' ? data.subtitleSessData : '';
-    const defaults = data.watchPromptDefaults && typeof data.watchPromptDefaults === 'object' ? data.watchPromptDefaults : {};
-    if (defaults.game || data.watchPromptDefault || data.watchDetailPromptDefault) {
+    if (data.watchPromptDefault || data.watchDetailPromptDefault) {
       watchDefaults = {
-        game: String(defaults.game || data.watchPromptDefault || ''),
-        video: String(defaults.video || ''),
-        web: String(defaults.web || ''),
-        chat: String(defaults.chat || ''),
+        game: String(data.watchPromptDefault || ''),
         detail: String(data.watchDetailPromptDefault || ''),
       };
     }
@@ -410,9 +406,6 @@ export const petSettingsScript = `
       watchMode: get('watchMode') ? get('watchMode').value : undefined,
       watchWindowHwnd: get('watchWindowHwnd') ? Number(get('watchWindowHwnd').value) : undefined,
       mergeLook: get('mergeLook') ? get('mergeLook').checked : undefined,
-      watchPromptVideo: get('watchPromptVideo') ? get('watchPromptVideo').value : undefined,
-      watchPromptWeb: get('watchPromptWeb') ? get('watchPromptWeb').value : undefined,
-      watchPromptChat: get('watchPromptChat') ? get('watchPromptChat').value : undefined,
       watchDetailPrompt: get('watchDetailPrompt') ? get('watchDetailPrompt').value : undefined,
       subtitleSessData: get('subtitleSessData') ? get('subtitleSessData').value.trim() : undefined,
     };
@@ -595,12 +588,8 @@ export const petSettingsScript = `
       message('删掉了', 'ok');
     } catch (error) { message(error instanceof Error ? error.message : String(error), 'error'); }
   });
-  // 【汐儿 · 11-11 m19324】提示词分页签：点哪个显示哪一栏，其他不变
-  const TAB_NAMES = { game: '游戏', video: '视频', web: '网页', chat: '聊天' };
-  const PANE_INPUT = { game: 'watchPrompt', video: 'watchPromptVideo', web: 'watchPromptWeb', chat: 'watchPromptChat' };
-  let activeTab = 'game';
-  const tabButtons = Array.prototype.slice.call(document.querySelectorAll('.tab'));
-  const tabPanes = Array.prototype.slice.call(document.querySelectorAll('.tabpane'));
+  // 【11-16 体检】提示词只有一份了：页签那套早就没有对应的 HTML（没有 data-tab），
+  // 留着只会让「恢复默认」点不动。
   const MODEL_TABS = Array.prototype.slice.call(document.querySelectorAll('.mtab'));
   const MODEL_PANES = Array.prototype.slice.call(document.querySelectorAll('.mpane'));
   // 大项页签：外观 / 模型 / 陪伴 / 其他（【汐儿 · 11-15】哥哥说「挤在一起要滑很久」）
@@ -715,24 +704,14 @@ export const petSettingsScript = `
   }
   MODEL_TABS.forEach((tab) => tab.addEventListener('click', () => showModelTab(tab.dataset.mtab ?? 'chat')));
 
-function showTab(name) {
-    activeTab = name;
-    tabButtons.forEach((el) => {
-      const on = el.getAttribute('data-tab') === name;
-      el.classList.toggle('is-on', on);
-      el.setAttribute('aria-selected', String(on));
-    });
-    tabPanes.forEach((el) => el.classList.toggle('is-on', el.getAttribute('data-pane') === name));
-  }
-  tabButtons.forEach((el) => el.addEventListener('click', () => showTab(String(el.getAttribute('data-tab')))));
-  // 恢复这一栏的默认：把内置默认全文填进框里（保存后就是自定义，和空串一个效果）
+  // 恢复默认：把内置默认全文填进框里（保存后就是自定义，和空串一个效果）
   const resetBtn = get('watch-prompt-reset');
   if (resetBtn) resetBtn.addEventListener('click', () => {
-    if (!watchDefaults) { message('还没读到默认提示词，稍等一下再点', 'error'); return; }
-    const input = get(PANE_INPUT[activeTab]);
+    if (!watchDefaults || !watchDefaults.game) { message('还没读到默认提示词，稍等一下再点', 'error'); return; }
+    const input = get('watchPrompt');
     if (!input) return;
-    input.value = watchDefaults[activeTab] || '';
-    message('「' + (TAB_NAMES[activeTab] || activeTab) + '」的默认已填入，记得点保存', 'ok');
+    input.value = watchDefaults.game;
+    message('默认提示词已填入，记得点保存', 'ok');
   });
   const detailReset = get('watch-detail-reset');
   if (detailReset) detailReset.addEventListener('click', () => {

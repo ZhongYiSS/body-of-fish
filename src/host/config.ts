@@ -476,9 +476,10 @@ function watchSectionField(own: unknown, label: string): { watch?: Record<string
     if (typeof src.tuning === 'object' && !Array.isArray(src.tuning)) out.tuning = src.tuning;
     else warnOnce(label + ':watch.tuning', '「' + label + '」的 watch.tuning 非法，已忽略');
   }
-  // 【汐儿 · 11-11 m19324】四套提示词：prompt = 游戏（老键名不改，兼容已存的配置），
-  // 另外三套按屏幕分类各一份；空串 = 用包里那份默认。
-  for (const key of ['prompt', 'promptVideo', 'promptWeb', 'promptChat', 'detailPrompt'] as const) {
+  // 提示词只有两份：`prompt`（陪伴看的这一套，老键名不改，兼容已存配置）和 `detailPrompt`（回看）。
+  // 【11-16 体检】promptVideo / promptWeb / promptChat 是 11-11 那次「四套提示词」的遗留，
+  // 11-16 已并回一套，页面没控件、宿主也不读——白名单里必须一起删掉，否则老配置会被当成有效值一直带着。
+  for (const key of ['prompt', 'detailPrompt'] as const) {
     const value = src[key];
     if (value === undefined || value === null) continue;
     if (typeof value === 'string') out[key] = value.slice(0, 16000);

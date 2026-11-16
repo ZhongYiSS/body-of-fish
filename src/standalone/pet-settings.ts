@@ -121,10 +121,6 @@ const patchSchema = z
     // 【汐儿 · 11-10 m18312】游戏陪伴：提示词全文可改 + 突变评分/尺寸/开口闸可调。
     // 空串 = 用内置默认（页面上的「恢复默认」就是写空串以外的默认全文，两者都认）。
     watchPrompt: z.string().max(16000).optional(),
-    // 【汐儿 · 11-11 m19324】四套提示词：watchPrompt 是游戏（老键名），另三套各一份
-    watchPromptVideo: z.string().max(16000).optional(),
-    watchPromptWeb: z.string().max(16000).optional(),
-    watchPromptChat: z.string().max(16000).optional(),
     watchDetailPrompt: z.string().max(4000).optional(),
     // 【汐儿 · 11-11 m19834】B站登录信息：看视频抓字幕用，只有这一处能填。
     subtitleSessData: z.string().trim().max(4096).optional(),
@@ -132,9 +128,6 @@ const patchSchema = z
     watchCutSpike: z.number().min(1).max(20).optional(),
     watchCutGapSec: z.number().min(0).max(60).optional(),
     watchIntegralLight: z.number().min(0.5).max(100).optional(),
-    watchKeyGapSec: z.number().min(0.2).max(10).optional(),
-    watchCutWidth: z.number().int().min(320).max(4096).optional(),
-    watchCutHeight: z.number().int().min(200).max(2560).optional(),
     watchStillWidth: z.number().int().min(320).max(4096).optional(),
     watchStillHeight: z.number().int().min(200).max(2560).optional(),
     watchTalkGapSec: z.number().int().min(2).max(3600).optional(),
@@ -266,9 +259,6 @@ export function viewOf(config: unknown): Record<string, unknown> {
   const watchSectionRaw = asDict(root.watch) ?? {};
   const watchTuning = normalizeTuning(watchSectionRaw.tuning as Parameters<typeof normalizeTuning>[0]);
   const watchPromptText = typeof watchSectionRaw.prompt === 'string' ? watchSectionRaw.prompt : '';
-  // 【汐儿 · 11-11 m19324】另三套：视频 / 网页 / 聊天
-  const watchPromptOf = (key: 'promptVideo' | 'promptWeb' | 'promptChat'): string =>
-    (typeof watchSectionRaw[key] === 'string' ? (watchSectionRaw[key] as string) : '');
   const watchDetailText = typeof watchSectionRaw.detailPrompt === 'string' ? watchSectionRaw.detailPrompt : '';
   const modeOf = (capability: (typeof modelSection)['vision']): (typeof BACKENDS)[number] =>
     capability.enabled ? (capability.backend.kind === 'local' ? 'local' : 'remote') : 'off';
@@ -584,10 +574,9 @@ export function applyPatch(config: Dict, patch: PetSettingsPatch): Dict {
     next.hint = merged;
   }
   const watchPatchTouched = [
-    patch.watchPrompt, patch.watchPromptVideo, patch.watchPromptWeb, patch.watchPromptChat,
-    patch.watchDetailPrompt, patch.watchCutAbs, patch.watchCutSpike,
-    patch.watchCutGapSec, patch.watchIntegralLight, patch.watchKeyGapSec,
-    patch.watchCutWidth, patch.watchCutHeight, patch.watchStillWidth, patch.watchStillHeight,
+    patch.watchPrompt, patch.watchDetailPrompt, patch.watchCutAbs, patch.watchCutSpike,
+    patch.watchCutGapSec, patch.watchIntegralLight,
+    patch.watchStillWidth, patch.watchStillHeight,
     patch.watchTalkGapSec, patch.watchFallbackSec,
     patch.watchCalmMinGapSec, patch.watchCalmIntegralSec, patch.watchCalmFloorSec,
     patch.watchNormalMinGapSec, patch.watchNormalIntegralSec, patch.watchNormalFloorSec,
@@ -608,9 +597,6 @@ export function applyPatch(config: Dict, patch: PetSettingsPatch): Dict {
     setNum("cutSpike", patch.watchCutSpike);
     setNum("cutMinGapSec", patch.watchCutGapSec);
     setNum("integralLight", patch.watchIntegralLight);
-    setNum("keySpacingSec", patch.watchKeyGapSec);
-    setNum("cutWidth", patch.watchCutWidth);
-    setNum("cutHeight", patch.watchCutHeight);
     setNum("stillWidth", patch.watchStillWidth);
     setNum("stillHeight", patch.watchStillHeight);
     const setPace = (which: "calm" | "normal" | "dense", key: string, value: number | undefined): void => {
@@ -631,10 +617,6 @@ export function applyPatch(config: Dict, patch: PetSettingsPatch): Dict {
     }
     if (Object.keys(tuning).length > 0) watch.tuning = tuning;
     if (patch.watchPrompt !== undefined) watch.prompt = patch.watchPrompt;
-    // 【汐儿 · 11-11 m19324】另三套：空串照样写进去（= 用默认），恢复默认就是清空
-    if (patch.watchPromptVideo !== undefined) watch.promptVideo = patch.watchPromptVideo;
-    if (patch.watchPromptWeb !== undefined) watch.promptWeb = patch.watchPromptWeb;
-    if (patch.watchPromptChat !== undefined) watch.promptChat = patch.watchPromptChat;
     if (patch.watchDetailPrompt !== undefined) watch.detailPrompt = patch.watchDetailPrompt;
     if (patch.watchTalkGapSec !== undefined) watch.talkGapSec = patch.watchTalkGapSec;
     if (patch.watchFallbackSec !== undefined) watch.fallbackSec = patch.watchFallbackSec;

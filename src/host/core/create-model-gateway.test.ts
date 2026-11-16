@@ -6,7 +6,7 @@ import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
 
 import { createModelGateway, statusOf } from './create-model-gateway.ts';
-import { compatChat, chatCompletionsUrl, mapHttpError, toDataUrl } from './adapters/openai-compat.ts';
+import { compatChat, chatCompletionsUrl, compatVision, mapHttpError, toDataUrl } from './adapters/openai-compat.ts';
 import type { ChatDelta, ModelConfig } from './model-gateway.ts';
 
 const CFG = (over: Partial<ModelConfig> = {}): ModelConfig => ({
@@ -301,5 +301,34 @@ describe('extraHeaders（独立模式的自定义请求头）', () => {
     assert.equal(text, '一张桌面');
     const hit = holder.last?.init.headers as Record<string, string>;
     assert.equal(hit['x-opencode-session'], 'body-of-fish');
+  });
+});
+
+describe('compatVision 流式中断（11-16 体检）', () => {
+  test('已经吐过字就不再整段重来：只发一次请求，返回已吐的字', async () => {
+    let calls = 0;
+    const impl = (async () => {
+      calls += 1;
+      const encoder = new TextEncoder();
+      const stream = new ReadableStream<Uint8Array>({
+        start(controller) {
+          controller.enqueue(encoder.encode('data: {"choices":[{"delta":{"content":"水里"}}]}\n'));
+          // 半路断：模拟连接被掐（以前这里会整段重来，同一眼说两遍）
+          setTimeout(() => controller.error(new Error('boom')), 0);
+        },
+      });
+      return new Response(stream, { status: 200, headers: { 'content-type': 'text/event-stream' } });
+    }) as unknown as typeof fetch;
+
+    const chunks: string[] = [];
+    const text = await compatVision(
+      { baseUrl: 'https://v.test/v1', model: 'vl' },
+      new Uint8Array([1]),
+      '看图',
+      { fetchImpl: impl, onDelta: (chunk) => chunks.push(chunk) },
+    );
+    assert.equal(text, '水里');
+    assert.deepEqual(chunks, ['水里']);
+    assert.equal(calls, 1, '已经吐过字就不该再整段请求一次');
   });
 });

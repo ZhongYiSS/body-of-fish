@@ -156,3 +156,19 @@ test('403 带机器可读 reason：没带 / 格式脏 / 对不上 分得开（�
     true,
   );
 });
+
+test('编码过的路径穿越蹭不到免令牌前缀（11-16 体检）', () => {
+  const security = createRequestSecurity();
+  const res = response();
+  assert.equal(security.authorize(request({}, '/dsh-pet-1/%2e%2e/standalone-pet/settings'), res as unknown as ServerResponse), false);
+  assert.equal(res.status, 403);
+});
+
+test('非回环来源直接拒（不怕伪造 Host 头，11-16 体检）', () => {
+  const security = createRequestSecurity();
+  const remote = request({}, '/state');
+  (remote.socket as unknown as { remoteAddress: string }).remoteAddress = '10.0.0.9';
+  const res = response();
+  assert.equal(security.authorize(remote, res as unknown as ServerResponse), false);
+  assert.equal(res.status, 403);
+});

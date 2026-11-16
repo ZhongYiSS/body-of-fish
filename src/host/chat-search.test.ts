@@ -136,3 +136,35 @@ test('composeNote：最多四条、跳过空标题、总长收住', () => {
   assert.ok(note.length <= 700);
   assert.equal(composeNote('q', [hit('', '')]), '');
 });
+
+test('超时要把底下的请求一起掐掉：signal 真的被 abort（11-16 体检）', async () => {
+  let seen: AbortSignal | undefined;
+  const runner = createSearchRunner({
+    searchBudgetMs: 20,
+    search: (_query, _timeoutMs, signal) => {
+      seen = signal;
+      return new Promise<SearchResult>(() => {});
+    },
+  });
+  const out = await runner.run('掐掉的查询');
+  assert.equal(out.reason, 'timeout');
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  assert.ok(seen !== undefined, '应该把 signal 传到底层');
+  assert.equal(seen?.aborted, true, '预算到点后底层请求必须被掐断');
+});
+
+test('搜失败也写负缓存：一分钟内同一句不再重复白跑（11-16 体检）', async () => {
+  let searched = 0;
+  const runner = createSearchRunner({
+    search: async (q) => {
+      searched += 1;
+      return { ok: false, engine: 'none', query: q, hits: [], ms: 1, reason: 'blocked' };
+    },
+  });
+  const first = await runner.run('没结果的查询');
+  const second = await runner.run('没结果的查询');
+  assert.equal(first.ok, false);
+  assert.equal(second.ok, false);
+  assert.equal(searched, 1, '60 秒内同一句只该真正搜一次');
+  assert.equal(second.cached, true);
+});

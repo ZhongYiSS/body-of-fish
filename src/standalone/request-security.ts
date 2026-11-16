@@ -22,10 +22,17 @@ function publicRead(req: IncomingMessage): boolean {
   if (req.method !== 'GET' && req.method !== 'HEAD') return false;
   let path: string;
   try {
-    path = new URL(req.url ?? '/', 'http://127.0.0.1').pathname;
+    /**
+     * 【11-16 体检】先解码再判：URL.pathname 不解码，于是
+     * `/dsh-pet-1/%2e%2e/standalone-pet/settings` 能蹭「/dsh-pet-N/ 免令牌」这条前缀，
+     * 再被路由按解码后的路径分派到真正要令牌的设置接口。解不出、或解完带 `..`，
+     * 一律当不安全（要令牌），宁可多拒不多放。
+     */
+    path = decodeURIComponent(new URL(req.url ?? '/', 'http://127.0.0.1').pathname);
   } catch {
     return false;
   }
+  if (path.includes('..')) return false;
   if (['/standalone-ai/settings', '/standalone-pet/settings', '/standalone-pet/profiles', '/shutdown'].includes(path)) return false;
   if (/^\/dsh-pet-\d+\/(?:whisper|chat)(?:\/|$)/.test(path)) return false;
   return (
@@ -67,6 +74,15 @@ export function createRequestSecurity(): RequestSecurity {
       return `${base.origin}/standalone-ai/#token=${token}`;
     },
     authorize(req, res) {
+      /**
+       * 【11-16 体检】Host 头谁都能写，socket 的对端地址不能。
+       * 本服务只绑回环，正常一定对得上；对不上说明是从外面转进来的，直接拒。
+       * （测试里的假 req 没有 remoteAddress，按「本机」放行，不影响判据。）
+       */
+      const remote = req.socket.remoteAddress;
+      if (remote !== undefined && remote !== '127.0.0.1' && remote !== '::1' && remote !== '::ffff:127.0.0.1') {
+        return rejectRequest(res, 403, '仅允许本机访问', 'not-loopback');
+      }
       const host = req.headers.host;
       const port = req.socket.localPort;
       if (!port || (host !== `127.0.0.1:${port}` && host !== `localhost:${port}`)) {

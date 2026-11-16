@@ -212,9 +212,23 @@ function looksBlocked(html: string): boolean {
   return html.includes('安全验证') || html.includes('请输入验证码') || html.includes('人机验证');
 }
 
-async function fetchText(url: string, timeoutMs: number, fetchImpl: typeof fetch): Promise<string> {
+async function fetchText(
+  url: string,
+  timeoutMs: number,
+  fetchImpl: typeof fetch,
+  signal?: AbortSignal,
+): Promise<string> {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
+  /**
+   * 【11-16 体检】上层的预算（chat-search 2 秒）要比我这家的 6 秒短，
+   * 所以要能把外层的 abort 透进来——否则预算到点只是「不要结果」，请求还在跑。
+   */
+  const forward = (): void => controller.abort();
+  if (signal !== undefined) {
+    if (signal.aborted) controller.abort();
+    else signal.addEventListener('abort', forward, { once: true });
+  }
   try {
     const response = await fetchImpl(url, {
       signal: controller.signal,
@@ -229,6 +243,7 @@ async function fetchText(url: string, timeoutMs: number, fetchImpl: typeof fetch
     return await response.text();
   } finally {
     clearTimeout(timer);
+    if (signal !== undefined) signal.removeEventListener('abort', forward);
   }
 }
 
@@ -239,7 +254,7 @@ async function fetchText(url: string, timeoutMs: number, fetchImpl: typeof fetch
  */
 export async function searchWeb(
   query: string,
-  options: { timeoutMs?: number; fetchImpl?: typeof fetch } = {},
+  options: { timeoutMs?: number; fetchImpl?: typeof fetch; signal?: AbortSignal } = {},
 ): Promise<SearchResult> {
   const q = String(query ?? '').trim();
   const timeoutMs = options.timeoutMs ?? SEARCH_TIMEOUT_MS;
@@ -260,8 +275,13 @@ export async function searchWeb(
   // 只有标题、没有摘要的那种结果（门户列表页）当备胎：真给不出摘要也比没有好
   let spare: { engine: 'baidu' | 'sogou' | 'so360' | 'bing'; hits: SearchHit[] } | null = null;
   for (const item of engines) {
+    // 外层已经不等了（超时/用户又说了新话）就别再一家家试下去了
+    if (options.signal?.aborted === true) {
+      lastReason = 'aborted';
+      break;
+    }
     try {
-      const html = await fetchText(item.url, timeoutMs, fetchImpl);
+      const html = await fetchText(item.url, timeoutMs, fetchImpl, options.signal);
       if (looksBlocked(html)) {
         lastReason = 'blocked';
         continue;
