@@ -2470,6 +2470,22 @@ export function apply(ctx: any): void {
       /* 记不了日志不能影响说话 */
     }
   };
+  /**
+   * 嘴的账本（【汐儿 · 11-17】9.16 ⑦ 定过、今天补上）：每次说话一行，`start / finish / drop / interrupt`。
+   *
+   * 为什么单开：`bubble.log` 记的是「字出没出」、`voice-play.log` 记的是「声放没放」，
+   * 但「这句话是根本没进嘴、还是进了被顶掉、还是说了被掐」只有嘴自己知道。
+   * 查「她怎么不说话」时先看这份，再顺着 key 去另外两份对时间。
+   */
+  const noteSpeak = (line: string): void => {
+    try {
+      const dir = join(userRoot, 'logs');
+      mkdirSync(dir, { recursive: true });
+      void appendFile(join(dir, 'speak.log'), `${new Date().toISOString()} ${line}\n`).catch(() => {});
+    } catch {
+      /* 记不了日志不能影响说话 */
+    }
+  };
 
   /** 两个「想」的并发表：同会话新顶旧，4/5 级掐别的会话（11-17 第 3 批） */
   const mind = createMind({ log: noteSense });
@@ -2951,6 +2967,7 @@ export function apply(ctx: any): void {
     const gone = speakSpecs.get(key);
     if (gone === undefined) return;
     speakSpecs.delete(key);
+    noteSpeak(`drop key=${key} reason=${outcome.message ?? (outcome.interrupted === true ? 'interrupted' : 'dropped')}`);
     try {
       gone.settle?.(outcome);
     } catch {
@@ -3014,6 +3031,9 @@ export function apply(ctx: any): void {
     noteVoiceIssue(
       `start key=${spec.key} priority=${spec.priority} kind=${spec.kind} chars=${spec.text.length} epoch=${myEpoch} budget=${budget}ms`,
     );
+    noteSpeak(
+      `start key=${spec.key} priority=${spec.priority} kind=${spec.kind} chars=${Array.from(spec.text).length} epoch=${myEpoch} budget=${budget}ms`,
+    );
     let settled = false;
     const done = (outcome: SpeakOutcome): void => {
       if (settled) return;
@@ -3023,6 +3043,9 @@ export function apply(ctx: any): void {
       markSpeakEnd();
       noteVoiceIssue(
         `finish key=${spec.key} ok=${outcome.ok} interrupted=${outcome.interrupted === true} cost=${Date.now() - startedAt}ms`,
+      );
+      noteSpeak(
+        `finish key=${spec.key} ok=${outcome.ok} interrupted=${outcome.interrupted === true} cost=${Date.now() - startedAt}ms message=${outcome.message ?? ''}`,
       );
       try {
         spec.settle?.(outcome);
@@ -3034,6 +3057,7 @@ export function apply(ctx: any): void {
     const onGuard = (): void => {
       if (speakActive === null || speakActive.key !== spec.key) return;
       noteVoiceIssue(`speak-stuck key=${spec.key} over ${budget}ms force-release`);
+      noteSpeak(`drop key=${spec.key} reason=stuck budget=${budget}ms`);
       stopLoud();
       speakActive = null;
       done({ ok: false, message: 'stuck' });
@@ -3066,6 +3090,7 @@ export function apply(ctx: any): void {
     const decision = admitSpeak(speakActive === null ? null : asJob(speakActive), speakQueue, asJob(spec));
     if (!decision.accepted) {
       debugTrace(`[speak] 丢掉 ${spec.key}：${decision.reason ?? 'unknown'}`);
+      noteSpeak(`reject key=${spec.key} priority=${spec.priority} reason=${decision.reason ?? 'unknown'}`);
       return Promise.resolve({ ok: false, message: decision.reason ?? 'dropped' });
     }
     for (const gone of decision.dropped) dropSpeakJob(gone.key, { ok: false, message: 'queue-full' });
@@ -3216,6 +3241,7 @@ export function apply(ctx: any): void {
       }
     }
     noteVoiceIssue(`interrupt reason=${reason} dropped=${dropped}`);
+    noteSpeak(`interrupt reason=${reason} dropped=${dropped}`);
   };
 
   /**
