@@ -2657,6 +2657,17 @@ export function apply(ctx: any): void {
     }
     state.writePet(petId, 'say', payload);
   };
+
+  /**
+   * 主气泡的唯一写入入口（第二批细化：`mouth` 接管之前先收口）。
+   * 全身体只有这里能碰 `pets.<id>.say` —— 碎碎念、say-loud 表情包这些「不等声音」的写法都走它。
+   * 以后接进 `mouth.ts` 时，只需要把这一处换成 `mouth.show()`，别处一个都不用动。
+   */
+  const writeSayNow = (petId: string, payload: Record<string, unknown>): void => {
+    state.writePet(petId, 'say', payload as never);
+    noteBubble(`write-now pet=${petId} text=${String(payload.text ?? '').slice(0, 20)}`);
+  };
+
   /** 收掉一句气泡（打断 / 卡死时用）：声音没了，字不该还挂着 */
   const clearSayBubble = (petId: string, source: 'chat' | 'companion'): void => {
     try {
@@ -3181,6 +3192,30 @@ export function apply(ctx: any): void {
       timer.unref?.();
     }
   };
+  /**
+   * 【汐儿 · 11-17】灯的自愈（文档 9.14 缺口②）：`listen` 60 秒、其余任务灯 90 秒没人续就自动收，
+   * 并记一行 `lamp-timeout`。模块崩了、心跳断了，副气泡不会永远挂着骗人。
+   */
+  const LAMP_TTL_MS: Readonly<Record<string, number>> = {
+    listen: 60_000,
+    ear: 60_000,
+    think: 90_000,
+    watch: 90_000,
+    say: 90_000,
+  };
+  const lampTimer = setInterval(() => {
+    const nowMs = Date.now();
+    for (const item of [...hintItems.values()]) {
+      const ttl = LAMP_TTL_MS[item.id];
+      if (ttl === undefined || item.kind !== 'task') continue;
+      if (nowMs - item.at <= ttl) continue;
+      hintItems.delete(item.id);
+      flushHint();
+      noteBubble(`lamp-timeout id=${item.id} age=${nowMs - item.at}ms`);
+    }
+  }, 30_000);
+  lampTimer.unref?.();
+
   const dropHint = (id: string): void => {
     if (hintItems.delete(id)) flushHint();
   };
@@ -4062,7 +4097,7 @@ export function apply(ctx: any): void {
         return { ok: false, reason: 'empty-pool', message: '碎碎念池里没有可用的句子' };
       }
       epoch += 1; // 碎碎念是「立刻说」：推一代，让还在合成中的旧句让位（哥哥 10-31 说的抢气泡）
-      state.writePet(petId, 'say', said);
+      writeSayNow(petId, said as unknown as Record<string, unknown>);
       return { ok: true, ...said };
     }
     // 【本鱼改造 · 10-30 只走本地】独立模式下**到此为止**：池子空着就安静，不偷偷调云端。
@@ -4097,7 +4132,7 @@ export function apply(ctx: any): void {
       return result;
     }
     epoch += 1; // 模型兜底也是「立刻说」：推一代压掉还在排队的气泡
-    state.writePet(petId, 'say', result.image ? { text: result.text, image: result.image } : { text: result.text });
+    writeSayNow(petId, result.image ? { text: result.text, image: result.image } : { text: result.text });
     // 文本随返回值带出，且与刚写进叶子的**是同一个变量**：两条出口给同一份文本，不是一个真相两个版本
     return { ok: true, text: result.text, ...(result.image ? { image: result.image } : {}) };
   };
@@ -4930,7 +4965,7 @@ export function apply(ctx: any): void {
           if (memeName !== '') {
             setTimeout(() => {
               if (myEpoch !== epoch) return;
-              state.writePet(petId, 'say', { text: clipped, image: memeName, phase: 'image' });
+              writeSayNow(petId, { text: clipped, image: memeName, phase: 'image' });
               logSayLoud(`meme bubble: ${memeName}`);
             }, MEME_TAIL_DELAY_MS);
           }

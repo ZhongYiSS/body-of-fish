@@ -54,7 +54,8 @@ describe('在听 / 在想：三个状态都要落到提示层', () => {
     // 11-16 晚：超时不仅「算成 idle」，还得把提示层那行摘掉、状态真的归零，
     // 否则【在听】会挂到天荒地老（哥哥 m24151）。
     assert.match(hostCode, /Date\.now\(\) - earPhaseAt <= EAR_PHASE_TTL_MS/);
-    assert.match(hostCode, /earPhase = 'idle';\n    dropHint\('ear'\);/);
+    // 11-17：文件是 CRLF，跨行断言要容忍 \r
+    assert.match(hostCode, /earPhase = 'idle';\r?\n    dropHint\('ear'\);/);
   });
 
   test('POST /ear 把 phase 收下来', () => {
