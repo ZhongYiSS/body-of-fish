@@ -39,7 +39,7 @@ describe('换卷式上下文（纯逻辑）', () => {
       ],
     };
     const prompt = summaryPrompt(session);
-    assert.match(prompt, /不超过 300 字/u);
+    assert.match(prompt, /300 字以内/u);
     assert.match(prompt, /他最后一句：记得别把声音弄丢/u);
     assert.doesNotMatch(prompt, /我在改身体\s*$/u);
   });

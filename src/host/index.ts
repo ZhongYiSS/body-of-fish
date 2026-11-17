@@ -4107,14 +4107,17 @@ export function apply(ctx: any): void {
     const picked = pickCards(cards, text, CARD_INJECT);
     if (picked.length > 0) void saveCards(touchCards(cards, picked, Date.now())).catch(() => {});
     const lines: string[] = [];
-    if (context.summary !== '') lines.push('【上一段说到哪了】' + context.summary);
+    if (lines.length === 0) lines.push('（下面是背景，不是他现在说的话；知道就行，别照念。）');
+    if (context.summary !== '') lines.push('【上回说到】' + context.summary);
     if (context.turns.length > 0) {
       lines.push(
-        '【这一段刚聊过】' +
+        '【刚聊过】' +
           context.turns.map((turn) => `${turn.kind === 'said' ? '你' : '他'}：${turn.text}`).join(' / '),
       );
     }
-    if (picked.length > 0) lines.push('【记着的事】' + picked.map((card) => card.text).join('；'));
+    if (picked.length > 0) {
+      lines.push('【记着的事（这些是以前记下的，不是他刚说的）】' + picked.map((card) => card.text).join('；'));
+    }
     return lines.length === 0 ? '' : '\n\n' + lines.join('\n');
   };
   // 对话写操作串行队列：read-modify-write 排队执行，防两端同时对话时交错写盘
@@ -6399,13 +6402,36 @@ export function apply(ctx: any): void {
                 'x-accel-buffering': 'no',
               });
               let last = '';
+              const lastSay = new Map<string, string>();
+              const lastHint = new Map<string, string>();
+              const emit = (name: string, payload: string): void => {
+                if (!res.writableEnded) res.write(`event: ${name}\ndata: ${payload}\n\n`);
+              };
               const push = async (): Promise<void> => {
                 const state = await handlePetRoute(`${ROUTE_PREFIX}/state`, 'GET');
                 if (state.kind !== 'json') return;
+                const obj = state.obj as { pets?: Record<string, unknown> };
+                // 明细事件：谁在说、说了什么；副气泡有哪些行。state 只推「有变化」的那一份摘要。
+                const pets = obj.pets ?? {};
+                for (const [petId, rawPet] of Object.entries(pets)) {
+                  if (rawPet === null || typeof rawPet !== 'object') continue;
+                  const pet = rawPet as { say?: Record<string, unknown>; hint?: { items?: unknown } };
+                  const said = pet.say ?? {};
+                  const sayKey = JSON.stringify([said.text ?? '', said.image ?? '', said.duration ?? 0]);
+                  if (lastSay.get(petId) !== sayKey) {
+                    lastSay.set(petId, sayKey);
+                    emit('say', JSON.stringify({ pet: petId, text: said.text ?? '', image: said.image, duration: said.duration }));
+                  }
+                  const hintKey = JSON.stringify(pet.hint?.items ?? []);
+                  if (lastHint.get(petId) !== hintKey) {
+                    lastHint.set(petId, hintKey);
+                    emit('hint', JSON.stringify({ pet: petId, items: pet.hint?.items ?? [] }));
+                  }
+                }
                 const text = JSON.stringify(state.obj);
                 if (text === last) return;
                 last = text;
-                if (!res.writableEnded) res.write(`event: state\ndata: ${text}\n\n`);
+                emit('state', text);
               };
               void push();
               const tick = setInterval(() => {

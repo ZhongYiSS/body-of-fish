@@ -60,7 +60,10 @@ describe('/v1 真门面', () => {
 
   it('SSE：每 1 秒推变化的 state、15 秒一个心跳、断开就收摊', () => {
     assert.match(code, /'content-type': 'text\/event-stream; charset=utf-8'/u);
-    assert.match(code, /event: state\\ndata: \$\{text\}/u);
+    assert.match(code, /emit\('state', text\);/u);
+    assert.match(code, /const emit = \(name: string, payload: string\): void => \{/u);
+    assert.match(code, /emit\('say', JSON\.stringify\(\{ pet: petId/u);
+    assert.match(code, /emit\('hint', JSON\.stringify\(\{ pet: petId/u);
     assert.match(code, /\}, 1_000\);/u);
     assert.match(code, /: ping\\n\\n/u);
     assert.match(code, /\}, 15_000\);/u);

@@ -19,8 +19,9 @@ function result(query: string, hits: { title: string; snippet: string }[]): Sear
 
 test('工具说明里给出标记格式，且写明「不用查就别输出标记」', () => {
   assert.match(SEARCH_TOOL_HINT, /\[\[web_search: 查询词\]\]/u);
-  assert.match(SEARCH_TOOL_HINT, /不需要查就直接回答/u);
-  assert.match(SEARCH_TOOL_HINT, /别编没查到的细节/u);
+  assert.match(SEARCH_TOOL_HINT, /不用查就直接答/u);
+  assert.match(SEARCH_TOOL_HINT, /别编没查到的/u);
+  assert.match(SEARCH_TOOL_HINT, /别念网址/u);
 });
 
 test('parseToolCall：认出标记、剥掉正文、全角冒号也认', () => {
