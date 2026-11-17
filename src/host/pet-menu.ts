@@ -238,9 +238,17 @@ export function petMenuLabels(state: PetMenuState): string[] {
   // 【汐儿 · 11-11 m19216】哥哥要的头是「陪伴 · 游戏/视频 · 开/关（正常/密）」——
   //   模式和档位都摆到一级，一眼就知道她在按哪套规则盯、现在开没开。
   const watchModeNow: WatchMode = state.watch?.mode ?? 'auto';
+  // 【汐儿 · 11-17 m25895 A 方案】取景三档提到一级：一眼看与陪伴都受它控制。
+  //   陪伴标题因此不再重复模式词（原来「陪伴 · 自动 · 开（正常）」，现在「陪伴 · 开（正常）」）。
+  for (const mode of WATCH_MODES) {
+    const mark = watchModeNow === mode ? '✓ ' : '';
+    labels.push(`取景：${mark}${watchModeWord(mode)}`);
+  }
+  // 「看他看到的（记录目录）…」也归到取景这一层：它记录的就是按这套取景看到的东西
+  labels.push('取景：看他看到的（记录目录）…');
   const watchHead = state.watch
-    ? `陪伴 · ${watchModeWord(watchModeNow)} · ${state.watch.running ? '开' : '关'}（${watchPaceWord(state.watch.pace)}）`
-    : `陪伴 · ${watchModeWord(watchModeNow)} · 关`;
+    ? `陪伴 · ${state.watch.running ? '开' : '关'}（${watchPaceWord(state.watch.pace)}）`
+    : '陪伴 · 关';
   labels.push(`${watchHead}：${state.watch?.running ? '✓ 开着（点一下关）' : '开（点一下开）'}`);
   for (const pace of ['calm', 'normal', 'dense'] as const) {
     const active = state.watch?.running === true && state.watch.pace === pace;
@@ -251,13 +259,7 @@ export function petMenuLabels(state: PetMenuState): string[] {
   // 11-09 晚 m16399：哥哥点了「出声（点一下开）」反而关掉声音——旧文案像「点一下打开」，
   //   实际是开关。改成把当前状态和点下去的结果都写清楚。
   labels.push(`${watchHead}：${watchSpeak ? '✓ 会出声（点一下静音）' : '不出声（点一下开）'}`);
-  // 【汐儿 · 11-11 m19041】三个模式：自动检测 / 游戏 / 视频。哥哥原话「这样不容易错」——
-  // 自动认不准时他能手动钉死一个，钉住之后宿主就不再猜了。
-  for (const mode of WATCH_MODES) {
-    const mark = watchModeNow === mode ? '✓ ' : '';
-    labels.push(`${watchHead}：模式 ${mark}${watchModeWord(mode)}`);
-  }
-  labels.push(`${watchHead}：看他看到的（记录目录）…`);
+
   // 碎碎念那一层：开关只有一项，带 ✓ 的那项就是"关掉它"——菜单里不许有点不动的东西
   // 【11-03 哥哥「30 秒碎碎念疑似没生效」】旧文案「✓ 自动关」读起来像"自动关着"，
   //   明明开着却让人以为没生效。改成「✓ 自动开（点一下关）」——状态和动作都写清楚。
@@ -377,6 +379,15 @@ export function parsePetMenuLabel(label: string): PetMenuAction | null {
     return { kind: 'watch-voice-toggle' };
   }
   if (text === '陪伴：看他看到的（记录目录）…') return { kind: 'watch-open-log' };
+  // 【汐儿 · 11-17 m25895 A 方案】一级「取景」层（全屏 / 自动 / 窗口 / 记录目录）
+  if (text.startsWith('取景：')) {
+    const rest = text.slice('取景：'.length).replace(/^✓\s*/u, '').trim();
+    if (rest === '全屏') return { kind: 'watch-mode', mode: 'full' };
+    if (rest === '自动') return { kind: 'watch-mode', mode: 'auto' };
+    if (rest === '窗口') return { kind: 'watch-mode', mode: 'window' };
+    if (rest.startsWith('看他看到的')) return { kind: 'watch-open-log' };
+    return null;
+  }
   const watchPrefix = text.startsWith(WATCH_PREFIX)
     ? WATCH_PREFIX
     : text.startsWith(LEGACY_WATCH_PREFIX)

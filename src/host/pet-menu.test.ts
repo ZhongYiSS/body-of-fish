@@ -51,8 +51,9 @@ test('标签：前缀只有状态/陪伴/碎碎念，长度与条数都在上限
     lookCount: 3,
   });
   for (const label of [...petMenuLabels(idle), ...running]) {
-    // 只许这三种前缀：多一种就会在壳里多出一层没人排过的菜单
-    assert.match(label, /^(状态|陪伴|看一眼|碎碎念)(\s*·[^：]*)?：/, `前缀不在约定里：${label}`);
+    // 只许这几种前缀：多一种就会在壳里多出一层没人排过的菜单
+    // 11-17 m25895：新增一级「取景」（全屏/自动/窗口/记录目录）
+    assert.match(label, /^(状态|陪伴|看一眼|碎碎念|取景)(\s*·[^：]*)?：/, `前缀不在约定里：${label}`);
     // 一个标签里只能有一个分组冒号，否则会多套一层
     assert.equal(label.split('：').length - 1, 1, `多了一个分组冒号会多套一层：${label}`);
     assert.ok(label.length <= 32, `label 超过 LABEL_MAX=32：${label}`);
@@ -108,7 +109,7 @@ test('看一眼层：标题带状态 + 开关 + 现在看一眼 + 自定义时�
   // 11-09 晚 m16273：关着的时候一级也要报配置好的时长 / 档位
   const paused = petMenuLabels({ ...idle, companionIntervalMs: 120000, watch: { running: false, pace: 'calm' } });
   assert.ok(paused.includes('看一眼 · 关（2 分钟）：开（点一下开）'), '关着也要看见配置的时长');
-  assert.ok(paused.includes('陪伴 · 自动 · 关（轻）：开（点一下开）'), '关着也要看见配置的档位');
+  assert.ok(paused.includes('陪伴 · 关（轻）：开（点一下开）'), '关着也要看见配置的档位');
   const on = petMenuLabels({ ...idle, companionRunning: true, companionIntervalMs: 120000 });
   assert.ok(on.includes('看一眼 · 开 2 分钟：✓ 开着（点一下关）'), '开着时标题报间隔、第一项是关掉它');
   assert.ok(!on.some((label) => label.startsWith('看一眼 · 关：')), '开着时标题不该还是「关」');
@@ -116,34 +117,34 @@ test('看一眼层：标题带状态 + 开关 + 现在看一眼 + 自定义时�
 
 test('陪伴层（原看护）：标题带状态 + 开关 + 三档节奏 + 出声', () => {
   const off = petMenuLabels(idle);
-  assert.ok(off.includes('陪伴 · 自动 · 关：开（点一下开）'), '关着的时候第一项就是打开它');
+  assert.ok(off.includes('陪伴 · 关：开（点一下开）'), '关着的时候第一项就是打开它');
   for (const pace of ['轻', '正常', '密']) {
     // 11-09 晚起标签尾巴带「（最多 N 张/分）」，只认前缀
     assert.ok(
-      off.some((label) => label.startsWith(`陪伴 · 自动 · 关：${pace}（最多`)),
+      off.some((label) => label.startsWith(`陪伴 · 关：${pace}（最多`)),
       `缺少节奏 ${pace}`,
     );
   }
   // 哥哥 11-09 晚：陪伴单独一个出声开关，默认关（安静只看不说）
-  assert.ok(off.includes('陪伴 · 自动 · 关：不出声（点一下开）'), '默认关');
+  assert.ok(off.includes('陪伴 · 关：不出声（点一下开）'), '默认关');
   assert.ok(!off.some((label) => label.includes('关掉')), '没开的时候不该有关停项');
 
   const on = petMenuLabels({ ...idle, watch: { running: true, pace: 'dense', speak: true } });
-  assert.ok(on.includes('陪伴 · 自动 · 开（密）：✓ 开着（点一下关）'), '开着时标题报节奏、第一项是关掉它');
-  assert.ok(on.includes('陪伴 · 自动 · 开（密）：✓ 密（最多 7.5 张/分）'));
+  assert.ok(on.includes('陪伴 · 开（密）：✓ 开着（点一下关）'), '开着时标题报节奏、第一项是关掉它');
+  assert.ok(on.includes('陪伴 · 开（密）：✓ 密（最多 7.5 张/分）'));
   assert.equal(
     on.filter((label) => /^陪伴 · [^：]*：[✓\s]*(轻|正常|密)/.test(label) && label.includes('✓')).length,
     1,
     '同一档位不能既有 ✓ 又无 ✓',
   );
-  assert.ok(on.includes('陪伴 · 自动 · 开（密）：✓ 会出声（点一下静音）'));
-  assert.ok(!on.some((label) => label.startsWith('陪伴 · 自动 · 关：')), '开着时标题不该还是「关」');
+  assert.ok(on.includes('陪伴 · 开（密）：✓ 会出声（点一下静音）'));
+  assert.ok(!on.some((label) => label.startsWith('陪伴 · 关：')), '开着时标题不该还是「关」');
 });
 
 test('陪伴层：出声文案说清状态 + 记录目录那一行（11-09 晚 m16399）', () => {
   const off = petMenuLabels({ ...idle, watch: { running: true, pace: 'normal', speak: false } });
-  assert.ok(off.includes('陪伴 · 自动 · 开（正常）：不出声（点一下开）'), '没开声音要写「不出声（点一下开）」');
-  assert.ok(off.includes('陪伴 · 自动 · 开（正常）：看他看到的（记录目录）…'), '要有打开记录目录的入口');
+  assert.ok(off.includes('陪伴 · 开（正常）：不出声（点一下开）'), '没开声音要写「不出声（点一下开）」');
+  assert.ok(off.includes('取景：看他看到的（记录目录）…'), '记录目录入口归到取景这一层');
   assert.deepEqual(parsePetMenuLabel('陪伴：✓ 会出声（点一下静音）'), { kind: 'watch-voice-toggle' });
   assert.deepEqual(parsePetMenuLabel('陪伴：不出声（点一下开）'), { kind: 'watch-voice-toggle' });
   assert.deepEqual(parsePetMenuLabel('陪伴：看他看到的（记录目录）…'), { kind: 'watch-open-log' });
@@ -334,29 +335,30 @@ test('整组刷新：切档位后旧的 ✓ 不残留', () => {
     labels: petMenuLabels({ ...idle, watch: { running: true, pace: 'dense' } }),
   });
   const snapshot = registry.snapshot().filter((item) => item.owner === PET_MENU_OWNER);
-  assert.ok(snapshot.some((item) => item.label === '陪伴 · 自动 · 开（密）：✓ 密（最多 7.5 张/分）'));
-  assert.ok(!snapshot.some((item) => item.label.startsWith('陪伴 · 自动 · 开（密）：✓ 轻（')), '注册是整体覆盖，旧档位必须消失');
+  assert.ok(snapshot.some((item) => item.label === '陪伴 · 开（密）：✓ 密（最多 7.5 张/分）'));
+  assert.ok(!snapshot.some((item) => item.label.startsWith('陪伴 · 开（密）：✓ 轻（')), '注册是整体覆盖，旧档位必须消失');
 });
 
 test('陪伴层一级标题带模式（11-16 m21257）：陪伴 · 全屏/窗口 · 开（密）', () => {
   const on = petMenuLabels({ ...idle, watch: { running: true, pace: 'dense', mode: 'window' } });
   assert.ok(
-    on.some((label) => label.startsWith('陪伴 · 窗口 · 开（密）：✓ 开着（点一下关）')),
+    on.some((label) => label.startsWith('陪伴 · 开（密）：✓ 开着（点一下关）')),
     '一级标题要写明按「视频」那套盯',
   );
-  assert.ok(on.includes('陪伴 · 窗口 · 开（密）：模式 ✓ 窗口'));
+  assert.ok(on.includes('取景：✓ 窗口'));
+  assert.ok(on.includes('取景：全屏') && on.includes('取景：自动'), '三档都在一级');
   assert.ok(!on.some((label) => label.startsWith('游戏陪伴')), '改回「陪伴 · 模式」了，旧名一行都不该剩');
 
   // 头里多出来的「· 模式」不影响解析：档位、模式、出声、记录都照样认
-  assert.deepEqual(parsePetMenuLabel('陪伴 · 窗口 · 开（密）：✓ 密（最多 7.5 张/分）'), {
+  assert.deepEqual(parsePetMenuLabel('陪伴 · 开（密）：✓ 密（最多 7.5 张/分）'), {
     kind: 'watch-start',
     pace: 'dense',
   });
-  assert.deepEqual(parsePetMenuLabel('陪伴 · 窗口 · 开（密）：模式 ✓全屏'), { kind: 'watch-mode', mode: 'full' });
-  assert.deepEqual(parsePetMenuLabel('陪伴 · 窗口 · 开（密）：✓ 会出声（点一下静音）'), {
+  assert.deepEqual(parsePetMenuLabel('陪伴 · 开（密）：模式 ✓全屏'), { kind: 'watch-mode', mode: 'full' });
+  assert.deepEqual(parsePetMenuLabel('陪伴 · 开（密）：✓ 会出声（点一下静音）'), {
     kind: 'watch-voice-toggle',
   });
-  assert.deepEqual(parsePetMenuLabel('陪伴 · 窗口 · 开（密）：看他看到的（记录目录）…'), {
+  assert.deepEqual(parsePetMenuLabel('陪伴 · 开（密）：看他看到的（记录目录）…'), {
     kind: 'watch-open-log',
   });
 
