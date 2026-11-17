@@ -34,7 +34,9 @@ function publicRead(req: IncomingMessage): boolean {
   }
   if (path.includes('..')) return false;
   if (['/standalone-ai/settings', '/standalone-pet/settings', '/standalone-pet/profiles', '/shutdown'].includes(path)) return false;
-  if (/^\/dsh-pet-\d+\/(?:whisper|chat)(?:\/|$)/.test(path)) return false;
+  // 敏感读一律要令牌（11-17 哥哥拍板）：配置里有 B站 cookie、窗口标题等于他在看什么、统计等于作息。
+  // 其余只读（/state、/thumb、/models…）继续公开，第三方轮询不受影响。
+  if (/^\/dsh-pet-\d+\/(?:whisper|chat|config|watch-stats|windows)(?:\/|$)/.test(path)) return false;
   return (
     [
       '/',

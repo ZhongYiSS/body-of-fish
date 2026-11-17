@@ -104,7 +104,11 @@ test('only minimal health, settings shell and known media GET are public; public
   for (const path of ['/standalone-ai/settings', '/dsh-pet-7340/whisper', '/dsh-pet-7340/chat', '/shutdown']) {
     assert.equal(security.authorize(request({}, path), response() as unknown as ServerResponse), false, path);
   }
-  for (const path of ['/dsh-pet-7340/config', '/dsh-pet-7340/state']) {
+  // 11-17：配置/统计/窗口列表含敏感信息（B站 cookie、窗口标题、作息），裸 GET 一律要令牌
+  for (const path of ['/dsh-pet-7340/config', '/dsh-pet-7340/watch-stats', '/dsh-pet-7340/windows']) {
+    assert.equal(security.authorize(request({}, path), response() as unknown as ServerResponse), false, path);
+  }
+  for (const path of ['/dsh-pet-7340/state']) {
     assert.equal(security.authorize(request({}, path), response() as unknown as ServerResponse), true, path);
     assert.equal(
       security.authorize(request({ origin: 'http://evil.test' }, path), response() as unknown as ServerResponse),
