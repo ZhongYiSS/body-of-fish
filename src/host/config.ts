@@ -577,6 +577,25 @@ function voiceSectionField(own: unknown, label: string): { voice?: Record<string
     if (Number.isFinite(n) && n >= 0 && n <= 100) out.volume = Math.round(n);
     else warnOnce(label + ':voice.volume', '「' + label + '」的 voice.volume 非法，已忽略');
   }
+  // 【汐儿 · 11-17 第 5 批（三）】嗓子四块：`voice.pick` 记当前用哪块，
+  //   `voice.presets` 记四块各自的字段（切块时先存这边、再套用到 model.tts）。
+  const picks = ['model', 'tts', 'windows', 'edge'];
+  if (typeof src.pick === 'string' && picks.includes(src.pick)) out.pick = src.pick;
+  const presets = src.presets;
+  if (presets !== null && typeof presets === 'object' && !Array.isArray(presets)) {
+    const clean: Record<string, Record<string, string>> = {};
+    for (const key of picks) {
+      const one = (presets as Record<string, unknown>)[key];
+      if (one === null || typeof one !== 'object' || Array.isArray(one)) continue;
+      const row: Record<string, string> = {};
+      for (const field of ['endpoint', 'model', 'baseUrl', 'apiKey', 'refAudioPath', 'promptText', 'protocol']) {
+        const value = (one as Record<string, unknown>)[field];
+        if (typeof value === 'string') row[field] = value.slice(0, 8192);
+      }
+      clean[key] = row;
+    }
+    if (Object.keys(clean).length > 0) out.presets = clean;
+  }
   // 排队过期（秒）与句子间隔（毫秒）：哥哥 11-15 要在设置页调
   for (const spec of [
     { key: 'staleSec', min: 1, max: 600 },

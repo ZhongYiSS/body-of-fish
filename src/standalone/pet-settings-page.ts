@@ -92,18 +92,24 @@ export const petSettingsPage = `<!doctype html>
 <p class="hint">本地 = 本机开着的识图服务（LM Studio、ollama 之类）；云端 = 可以单独填地址与密钥，两栏留空就沿用上面「对话模型」那一份。</p>
 </div>
 <div class="mpane" data-mpane="voice">
-<div class="pair"><label for="voiceMode">后端</label><select id="voiceMode">
-<option value="off">关</option><option value="local">本地</option><option value="remote">云端</option></select></div>
-<div class="pair"><label for="voiceProtocol">发声协议</label><select id="voiceProtocol">
-<option value="openai">标准接口（/audio/speech）</option><option value="sovits">GPT-SoVITS（/tts）</option><option value="system">Windows 自带（离线免费）</option><option value="edge">Edge 在线（免费，要联网）</option></select></div>
-<label for="voiceEndpoint">本地地址</label><input id="voiceEndpoint" type="text" maxlength="512" placeholder="http://127.0.0.1:9880">
-<label for="voiceModel">模型名 / 音色</label><input id="voiceModel" type="text" maxlength="200" placeholder="留空用服务端默认">
-<div class="pair"><label for="voiceBaseUrl">云端接口地址（留空 = 沿用对话模型）</label><input id="voiceBaseUrl" type="url" maxlength="2048" placeholder="https://example.com/v1" spellcheck="false"></div>
-<label for="voiceApiKey">云端 API 密钥 <span id="voice-key-state" class="hint">尚未读取</span></label>
-<input id="voiceApiKey" type="password" autocomplete="new-password" maxlength="8192" placeholder="留空保留已保存的密钥">
-<label class="check"><input id="clearVoiceApiKey" type="checkbox"> 清除声音自己的密钥（回落对话模型那把）</label>
-<div class="pair"><label for="voiceRefAudio">参考音（绝对路径）</label><input id="voiceRefAudio" type="text" maxlength="512" placeholder="D:\\\\AI\\\\GPT-SoVITS\\\\_ref.wav"></div>
-<div class="pair"><label for="voicePromptText">参考音说的话</label><input id="voicePromptText" type="text" maxlength="500" placeholder="与参考音逐字一致"></div>
+<div class="vtabs" role="tablist">
+<button class="vtab is-on" type="button" data-vpick="model">模型直连</button>
+<button class="vtab" type="button" data-vpick="tts">本地 TTS</button>
+<button class="vtab" type="button" data-vpick="windows">Windows 系统</button>
+<button class="vtab" type="button" data-vpick="edge">Edge 在线</button>
+</div>
+<p class="hint">四块各存一套设置：切过去只换「现在用哪块」，别块的地址、密钥、参考音都不会丢。</p>
+<div hidden>
+<select id="voiceMode"><option value="off">关</option><option value="local">本地</option><option value="remote">云端</option></select>
+<select id="voiceProtocol"><option value="openai">openai</option><option value="sovits">sovits</option><option value="system">system</option><option value="edge">edge</option></select>
+</div>
+<div class="pair" data-vrow="baseUrl"><label for="voiceBaseUrl">接口地址（留空 = 沿用对话模型）</label><input id="voiceBaseUrl" type="url" maxlength="2048" placeholder="https://example.com/v1" spellcheck="false"></div>
+<div class="pair" data-vrow="apiKey"><label for="voiceApiKey">API 密钥 <span id="voice-key-state" class="hint">尚未读取</span></label><input id="voiceApiKey" type="password" autocomplete="new-password" maxlength="8192" placeholder="留空保留已保存的密钥"></div>
+<div class="pair" data-vrow="apiKey"><label class="check"><input id="clearVoiceApiKey" type="checkbox"> 清除这块自己的密钥（回落对话模型那把）</label></div>
+<div class="pair" data-vrow="endpoint"><label for="voiceEndpoint">本地地址</label><input id="voiceEndpoint" type="text" maxlength="512" placeholder="http://127.0.0.1:9880"></div>
+<label for="voiceModel" id="voiceModelLabel">模型名 / 音色</label><input id="voiceModel" type="text" maxlength="200" placeholder="留空用服务端默认">
+<div class="pair" data-vrow="refAudio"><label for="voiceRefAudio">参考音（绝对路径）</label><input id="voiceRefAudio" type="text" maxlength="512" placeholder="D:\\AI\\GPT-SoVITS\\_ref.wav"></div>
+<div class="pair" data-vrow="refAudio"><label for="voicePromptText">参考音说的话</label><input id="voicePromptText" type="text" maxlength="500" placeholder="与参考音逐字一致"></div>
 <div class="pair"><label for="voiceVolume">播放音量（0–100）</label><input id="voiceVolume" type="range" min="0" max="100" step="5"><span id="voiceVolumeOut" class="test-result"></span></div>
 <div class="pair"><label for="voiceStaleSec">排队过期（秒）</label><input id="voiceStaleSec" type="number" min="1" max="600" step="1"><span class="test-result">没轮到的句子超过这么久就作废，内容并进下一句</span></div>
 <div class="pair"><label for="voiceGapMs">句子间隔（毫秒）</label><input id="voiceGapMs" type="number" min="0" max="5000" step="100"><span class="test-result">两句之间停多久，0 = 不停</span></div>
@@ -200,7 +206,7 @@ button.mini{background:#fff;color:var(--blue);border:1.5px solid var(--blue);min
 .gtabs{display:flex;gap:6px;margin:14px 0 0;flex-wrap:wrap}
 .gtab{padding:7px 14px;border:1px solid var(--line);border-radius:8px 8px 0 0;background:#fff;color:var(--muted);font:inherit;cursor:pointer}
 .gtab.is-on{background:var(--blue-soft);color:var(--blue);border-bottom-color:var(--blue-soft);font-weight:600}
-.gpane{display:none}.gpane.is-on{display:block}
+.gpane{display:none}.gpane.is-on{display:block}.vtabs{display:flex;gap:6px;flex-wrap:wrap;margin:6px 0 10px}.vtab{border:1px solid #c9d8ea;background:#f2f8ff;color:#1f4f8f;border-radius:8px;padding:5px 10px;font:inherit;cursor:pointer}.vtab.is-on{background:#2e7cd6;border-color:#2e7cd6;color:#fff}
 .hint-drag{position:relative;height:170px;margin:8px 0 4px;border:1px dashed var(--line);border-radius:10px;background:linear-gradient(180deg,#f6fbff,#eaf3fb);overflow:hidden;touch-action:none}
 .hint-body{position:absolute;left:26px;top:34px;width:74px;height:104px;border-radius:10px;background:#cfe3f5}
 .hint-body::after{content:"身体";position:absolute;inset:0;display:flex;align-items:center;justify-content:center;color:#5a6b84;font-size:12px}
@@ -285,6 +291,75 @@ export const petSettingsScript = `
   const numbers = ['size', 'marginX', 'marginY', 'fontSize', 'gravity', 'restitution', 'groundFriction',
     'throwPower', 'maxTokens'];
   const flags = ['desktopVisible', 'fixedEnabled', 'confineToScreen', 'followPet', 'ceilingBounce', 'enabled'];
+  // 【汐儿 · 11-17 第 5 批（三）】嗓子四块：页签切换 + 每块各存一份
+  var VOICE_PICKS = ['model', 'tts', 'windows', 'edge'];
+  var voicePickNow = 'model';
+  var voiceDraft = {};
+  function saveVoiceInputs() {
+    var d = voiceDraft[voicePickNow] || (voiceDraft[voicePickNow] = {});
+    d.endpoint = get('voiceEndpoint').value.trim();
+    d.model = get('voiceModel').value.trim();
+    d.refAudioPath = get('voiceRefAudio').value.trim();
+    d.promptText = get('voicePromptText').value.trim();
+    d.baseUrl = get('voiceBaseUrl').value.trim();
+    var key = get('voiceApiKey').value.trim();
+    if (key !== '') d.apiKey = key;
+  }
+  function loadVoiceInputs() {
+    var d = voiceDraft[voicePickNow] || {};
+    get('voiceEndpoint').value = d.endpoint || '';
+    get('voiceModel').value = d.model || '';
+    get('voiceRefAudio').value = d.refAudioPath || '';
+    get('voicePromptText').value = d.promptText || '';
+    get('voiceBaseUrl').value = d.baseUrl || '';
+    get('voiceApiKey').value = '';
+    get('clearVoiceApiKey').checked = false;
+  }
+  var VOICE_ROWS = { model: ['baseUrl', 'apiKey'], tts: ['endpoint', 'refAudio'], windows: [], edge: [] };
+  var VOICE_MODEL_LABEL = {
+    model: 'TTS 模型名',
+    tts: '音色名（GPT-SoVITS 的模型）',
+    windows: '音色（留空用系统默认，例如 Microsoft Huihui Desktop）',
+    edge: '音色（留空用默认，例如 zh-CN-XiaoxiaoNeural）',
+  };
+  function showVoicePick(pick) {
+    if (VOICE_PICKS.indexOf(pick) < 0) pick = 'model';
+    if (pick !== voicePickNow) saveVoiceInputs();
+    voicePickNow = pick;
+    var tabs = document.querySelectorAll('.vtab');
+    for (var i = 0; i < tabs.length; i += 1) {
+      tabs[i].classList.toggle('is-on', tabs[i].getAttribute('data-vpick') === pick);
+    }
+    var rows = document.querySelectorAll('[data-vrow]');
+    for (var j = 0; j < rows.length; j += 1) {
+      var kind = rows[j].getAttribute('data-vrow');
+      rows[j].style.display = VOICE_ROWS[pick].indexOf(kind) >= 0 ? '' : 'none';
+    }
+    var label = get('voiceModelLabel');
+    if (label) label.textContent = VOICE_MODEL_LABEL[pick];
+    loadVoiceInputs();
+    get('voiceMode').value = pick === 'model' ? 'remote' : 'local';
+    get('voiceProtocol').value = pick === 'model' ? 'openai' : pick === 'tts' ? 'sovits' : pick === 'windows' ? 'system' : 'edge';
+  }
+  function seedVoiceDraft(data) {
+    voiceDraft = {};
+    var presets = data && data.voicePresets ? data.voicePresets : {};
+    for (var i = 0; i < VOICE_PICKS.length; i += 1) {
+      var key = VOICE_PICKS[i];
+      voiceDraft[key] = presets[key] ? JSON.parse(JSON.stringify(presets[key])) : {};
+    }
+    var pick = data && data.voicePick ? data.voicePick : 'model';
+    var live = voiceDraft[pick] || (voiceDraft[pick] = {});
+    var fillIfEmpty = function (name, value) { if (!live[name] && value) live[name] = value; };
+    fillIfEmpty('endpoint', data ? data.voiceEndpoint : '');
+    fillIfEmpty('model', data ? data.voiceModel : '');
+    fillIfEmpty('baseUrl', data ? data.voiceBaseUrl : '');
+    fillIfEmpty('refAudioPath', data ? data.voiceRefAudio : '');
+    fillIfEmpty('promptText', data ? data.voicePromptText : '');
+    voicePickNow = 'model';
+    showVoicePick(pick);
+  }
+
   function fillPet(data) {
     for (const id of ['name', 'fontFamily', 'corner', 'persona', 'visionMode', 'visionEndpoint', 'visionModel',
       'visionBaseUrl', 'voiceMode', 'voiceProtocol', 'voiceEndpoint', 'voiceModel', 'voiceBaseUrl',
@@ -292,6 +367,8 @@ export const petSettingsScript = `
       'earHotkey', 'peekHotkey', 'sayHotkey']) {
       const el = get(id); if (el && data[id] !== undefined) el.value = String(data[id]);
     }
+    // 嗓子四块：先把四份草稿装好，再按当前那块铺到控件上
+    seedVoiceDraft(data);
     // 密钥不回显：只报「有没有」，输入框清空，勾选框复位
     for (const cap of ['vision', 'voice']) {
       const state = get(cap + '-key-state');
@@ -415,6 +492,10 @@ export const petSettingsScript = `
     // 密钥只在非空时提交（空 = 保留已保存的那把）
     const visionKey = get('visionApiKey').value; if (visionKey) body.visionApiKey = visionKey;
     const voiceKey = get('voiceApiKey').value; if (voiceKey) body.voiceApiKey = voiceKey;
+    // 嗓子四块：当前这块 + 四块的草稿一起送（服务端按 pick 套用，别块的字段不丢）
+    saveVoiceInputs();
+    body.voicePick = voicePickNow;
+    body.voicePresets = voiceDraft;
     return body;
   }
   /** 「Key: Value」一行一条 → 对象；坏行忽略。 */
@@ -509,6 +590,9 @@ export const petSettingsScript = `
     } catch (error) { message(error instanceof Error ? error.message : String(error), 'error'); return false; }
     finally { save.disabled = false; }
   }
+  document.querySelectorAll('.vtab').forEach((tab) => {
+    tab.addEventListener('click', () => showVoicePick(tab.getAttribute('data-vpick')));
+  });
   form.addEventListener('submit', (event) => { event.preventDefault(); void doSave(); });
   // 隐藏页签里的必填项报错时用户看不见：先切到那一页，再让浏览器弹提示
   form.addEventListener('invalid', (event) => {
