@@ -244,6 +244,7 @@ import {
 } from './core/speak-center';
 import { priorityFor } from './pipeline/level';
 import { describeEvent, makeEvent } from './pipeline/sense';
+import { createMind } from './pipeline/mind';
 import { createPetServices, ServiceError } from './core/create-pet-services';
 import { PET_CALL_IDENTITY } from './llm-call';
 import { parseStandaloneRuntime, probeStandalone } from './core/connection';
@@ -1379,16 +1380,26 @@ export function apply(ctx: any): void {
             now.conf.chatImageEnabled === true
               ? limitPool(memePoolFor(now.entry, now.conf), Number(now.conf.chatImageLimit))
               : [];
-          const generated = usesOwnModel(now.conf)
-            ? await generateChatViaGateway(gatewayFor(now.conf), system, history, companionLookPrompt(description), pool)
-            : await generateChat(
-                ctx,
-                system,
-                history,
-                companionLookPrompt(description),
-                pool,
-                configuredModel(now.conf, 'chatModel'),
-              );
+          const generated = await thinkOnScreen((signal) =>
+            usesOwnModel(now.conf)
+              ? generateChatViaGateway(
+                  gatewayFor(now.conf),
+                  system,
+                  history,
+                  companionLookPrompt(description),
+                  pool,
+                  undefined,
+                  signal,
+                )
+              : generateChat(
+                  ctx,
+                  system,
+                  history,
+                  companionLookPrompt(description),
+                  pool,
+                  configuredModel(now.conf, 'chatModel'),
+                ),
+          );
           if (!generated.ok) {
             debugTrace('[look] 说话失败：' + generated.message);
             return '';
@@ -2297,9 +2308,26 @@ export function apply(ctx: any): void {
         found.conf.chatImageEnabled === true
           ? limitPool(memePoolFor(found.entry, found.conf), Number(found.conf.chatImageLimit))
           : [];
-      const generated = usesOwnModel(found.conf)
-        ? await generateChatViaGateway(gatewayFor(found.conf), system, [], companionLookPrompt(description), pool)
-        : await generateChat(ctx, system, [], companionLookPrompt(description), pool, configuredModel(found.conf, 'chatModel'));
+      const generated = await thinkOnScreen((signal) =>
+        usesOwnModel(found.conf)
+          ? generateChatViaGateway(
+              gatewayFor(found.conf),
+              system,
+              [],
+              companionLookPrompt(description),
+              pool,
+              undefined,
+              signal,
+            )
+          : generateChat(
+              ctx,
+              system,
+              [],
+              companionLookPrompt(description),
+              pool,
+              configuredModel(found.conf, 'chatModel'),
+            ),
+      );
       if (!generated.ok) return fail(generated.message ?? '模型没接上');
       const text = generated.text.trim();
       if (!text) return fail('模型没说话');
@@ -2433,6 +2461,21 @@ export function apply(ctx: any): void {
       void appendFile(join(dir, 'sense.log'), `${new Date().toISOString()} ${line}\n`).catch(() => {});
     } catch {
       /* 记不了日志不能影响说话 */
+    }
+  };
+
+  /** 两个「想」的并发表：同会话新顶旧，4/5 级掐别的会话（11-17 第 3 批） */
+  const mind = createMind({ log: noteSense });
+  /**
+   * 「屏幕想」：陪伴/一眼看的生成也登记进并发表（session='screen'，2 级）。
+   * 4/5 级的手动动作来了会把它掐掉；底层支持 AbortSignal 的那条（网关）真掐，DSH 那条只登记。
+   */
+  const thinkOnScreen = async <T>(fn: (signal: AbortSignal) => Promise<T>): Promise<T> => {
+    const run = mind.begin('screen', 2);
+    try {
+      return await fn(run.signal);
+    } finally {
+      run.end();
     }
   };
   /**
@@ -4223,10 +4266,17 @@ export function apply(ctx: any): void {
       // 历史 = 最近 30 分钟：对话、看一眼、陪伴说的话共用这一个池（哥哥 11-09：不要隔离开）
       const list = await recentMessages();
       // 模型：条目配置的 chatModel 优先（留空 = 不指定）；生成侧失败会回落到当前对话的模型重试一次
-      const ask = async (sys: string) =>
-        usesOwnModel(found.conf)
-          ? await generateChatViaGateway(gatewayFor(found.conf), sys, list, text, pool)
-          : await generateChat(ctx, sys, list, text, pool, configuredModel(found.conf, 'chatModel'));
+      // 【汐儿 · 11-17 第 3 批】每问一次就开一轮「想」：他再开口时，上一轮没算完的自动作废。
+      const ask = async (sys: string) => {
+        const mine = mind.begin('main', heard.level);
+        try {
+          return usesOwnModel(found.conf)
+            ? await generateChatViaGateway(gatewayFor(found.conf), sys, list, text, pool, undefined, mine.signal)
+            : await generateChat(ctx, sys, list, text, pool, configuredModel(found.conf, 'chatModel'));
+        } finally {
+          mine.end();
+        }
+      };
       let generated = await ask(system);
       if (!generated.ok) {
         dropHint('think');

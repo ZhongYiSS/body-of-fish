@@ -200,12 +200,15 @@ export async function generateChatViaGateway(
   userText: string,
   pool: MemeEntry[] = [],
   timeoutMs = TIMEOUT_MS,
+  /** 【汐儿 · 11-17 第 3 批】外面来的取消信号（他被新消息顶掉时，这一轮不必再算完） */
+  externalSignal?: AbortSignal,
 ): Promise<ChatGenerateResult> {
   const wantImage = pool.length > 0;
   // 【汐儿 · 11-10】配图清单进 system，user 正文保持纯文本（原先拼在用户那句尾巴上，
   // 小模型会读成「哥哥给我发了图」）。
   const systemContent = wantImage ? system + imageInstruction(pool) : system;
-  const signal = AbortSignal.timeout(timeoutMs);
+  const timeout = AbortSignal.timeout(timeoutMs);
+  const signal = externalSignal === undefined ? timeout : AbortSignal.any([timeout, externalSignal]);
   let text = '';
   try {
     for await (const frame of gateway.chat({
