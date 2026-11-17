@@ -12,6 +12,7 @@ import {
   MOUTH_QUEUE_MAX,
   canInterrupt,
   droppableWhenBusy,
+  priorityFor,
   replyLevel,
 } from './level.ts';
 import type { Level } from './types.ts';
@@ -80,5 +81,15 @@ describe('五级台阶：丢谁、排多久、写什么字', () => {
       LEVELS.map((level) => LEVEL_WORD[level]),
       ['碎碎念', '主动', '对话', '手动', '听一句'],
     );
+  });
+});
+
+describe('五级台阶落到嘴的四档', () => {
+  it('5/4 都掐，3 正常，2 让一档，1 谁都让', () => {
+    assert.equal(priorityFor(5), 'urgent');
+    assert.equal(priorityFor(4), 'urgent');
+    assert.equal(priorityFor(3), 'normal');
+    assert.equal(priorityFor(2), 'high');
+    assert.equal(priorityFor(1), 'low');
   });
 });

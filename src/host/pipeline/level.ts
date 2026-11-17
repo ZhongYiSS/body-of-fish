@@ -9,6 +9,7 @@
  * 设计文档：`C:/Users/hb109/Desktop/身体修改思路.md` 第 2、3 章与 9.1。
  */
 
+import type { SpeakPriority } from '../core/speak-center';
 import type { Level, SenseEvent } from './types';
 
 /** 五级全列一遍（顺序固定，别处照这个遍历） */
@@ -95,3 +96,20 @@ export const LEVEL_EXPIRE_MS: Readonly<Record<Level, number>> = {
 
 /** 排队上限：超了先丢最低、同级的丢最老（5 级永远不丢） */
 export const MOUTH_QUEUE_MAX = 3;
+
+/**
+ * 五级台阶落到「嘴」的四个优先级上（`speak-center.ts` 里的老四档必须够用——
+ * 换一套并行机制就会有两份仲裁，那是 bug 工厂）。
+ *
+ *   5 听一句 / 紧急  → urgent（谁都能掐）
+ *   4 手动          → urgent
+ *   3 对话          → normal
+ *   2 主动（陪伴/一眼看）→ high
+ *   1 碎碎念        → low（谁都能把它挤掉）
+ */
+export function priorityFor(level: Level): SpeakPriority {
+  if (level >= 4) return 'urgent';
+  if (level === 3) return 'normal';
+  if (level === 2) return 'high';
+  return 'low';
+}
