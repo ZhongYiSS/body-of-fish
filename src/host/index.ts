@@ -114,7 +114,7 @@ import { createHash } from 'node:crypto';
 import { readFile, mkdir, writeFile, appendFile, readdir, stat, unlink } from 'node:fs/promises';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { homedir } from 'node:os';
-import { join, normalize, resolve, sep } from 'node:path';
+import { dirname, join, normalize, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { resolveDshHome } from '@deepseek-ai/dsh-home-paths';
 import { dataDirIn } from './data-dir';
@@ -245,6 +245,9 @@ import {
 import { priorityFor } from './pipeline/level';
 import { describeEvent, makeEvent } from './pipeline/sense';
 import { createMind } from './pipeline/mind';
+import { CARD_INJECT, makeCard, parseRemember, pickCards, splitOverflow, touchCards } from './pipeline/cards';
+import type { Card } from './pipeline/cards';
+import { createSessionStore } from './pipeline/session';
 import { createPetServices, ServiceError } from './core/create-pet-services';
 import { PET_CALL_IDENTITY } from './llm-call';
 import { parseStandaloneRuntime, probeStandalone } from './core/connection';
@@ -4025,6 +4028,71 @@ export function apply(ctx: any): void {
   // 旧的 `memory.json`（跨天累积的那份）**不再读写**：文件留原地不动，但里面的历史从此不参与上下文——
   // 哥哥要的就是「桌宠不要长期记忆」，历史想留着自己翻文件。
   const memoryStore: MemoryStore = createMemoryStore({ dir: join(userRoot, 'memory') });
+  // 【汐儿 · 11-17 第 4 批】换卷式上下文：卷满了（5000 字）就归档 + 摘要，旧卷不删。
+  const sessionStore = createSessionStore({
+    dir: join(userRoot, 'memory'),
+    summarize: async (prompt) => {
+      const found = findPetInstance(readAllConfig(configPaths), 'main');
+      if (found === undefined) return '';
+      const gateway = gatewayFor(found.conf);
+      let out = '';
+      for await (const frame of gateway.chat({
+        messages: [{ role: 'system', text: '你是摘要器，只按要求输出摘要，不寒暄。' }, { role: 'user', text: prompt }],
+        signal: AbortSignal.timeout(20_000),
+      })) {
+        if (frame.type === 'text' && typeof frame.text === 'string') out += frame.text;
+        if (frame.type === 'error') return '';
+      }
+      return out;
+    },
+    log: (line) => noteSense(line),
+  });
+  // 长期卡片：他说「记住：…」或者设置页手填的，跨卷常驻
+  let cardCache: Card[] | undefined;
+  const cardsFile = join(userRoot, 'memory', 'cards.json');
+  const loadCards = async (): Promise<Card[]> => {
+    if (cardCache !== undefined) return cardCache;
+    try {
+      const parsed = JSON.parse(await readFile(cardsFile, 'utf8')) as { cards?: Card[] };
+      cardCache = Array.isArray(parsed.cards) ? parsed.cards : [];
+    } catch {
+      cardCache = [];
+    }
+    return cardCache;
+  };
+  const saveCards = async (cards: Card[]): Promise<void> => {
+    const { keep, archive } = splitOverflow(cards);
+    cardCache = keep;
+    await mkdir(dirname(cardsFile), { recursive: true });
+    await writeFile(cardsFile, `${JSON.stringify({ cards: keep }, null, 2)}\n`, 'utf8');
+    if (archive.length > 0) {
+      const archiveFile = join(userRoot, 'memory', 'cards-archive.json');
+      let old: Card[] = [];
+      try {
+        const parsed = JSON.parse(await readFile(archiveFile, 'utf8')) as { cards?: Card[] };
+        if (Array.isArray(parsed.cards)) old = parsed.cards;
+      } catch {
+        old = [];
+      }
+      await writeFile(archiveFile, `${JSON.stringify({ cards: [...old, ...archive] }, null, 2)}\n`, 'utf8');
+    }
+  };
+  /** 这一段的摘要 + 最近几条 + 挑中的卡片，拼成系统提示词末尾的一块 */
+  const memoryBlockFor = async (text: string): Promise<string> => {
+    const [context, cards] = await Promise.all([sessionStore.context(), loadCards()]);
+    const picked = pickCards(cards, text, CARD_INJECT);
+    if (picked.length > 0) void saveCards(touchCards(cards, picked, Date.now())).catch(() => {});
+    const lines: string[] = [];
+    if (context.summary !== '') lines.push('【上一段说到哪了】' + context.summary);
+    if (context.turns.length > 0) {
+      lines.push(
+        '【这一段刚聊过】' +
+          context.turns.map((turn) => `${turn.kind === 'said' ? '你' : '他'}：${turn.text}`).join(' / '),
+      );
+    }
+    if (picked.length > 0) lines.push('【记着的事】' + picked.map((card) => card.text).join('；'));
+    return lines.length === 0 ? '' : '\n\n' + lines.join('\n');
+  };
   // 对话写操作串行队列：read-modify-write 排队执行，防两端同时对话时交错写盘
   let chatQueue: Promise<void> = Promise.resolve();
 
@@ -4219,6 +4287,14 @@ export function apply(ctx: any): void {
       // 【汐儿 · 11-17 第 2 批】等级由「听」这里定好交出去，想和嘴都不许改（哥哥批注三）。
       const heard = makeEvent({ kind: 'heard', source: 'ear', text });
       noteSense(describeEvent(heard));
+      // 【汐儿 · 11-17 第 4 批】「记住：…」收进长期卡片；听到的话进这一卷
+      const remember = parseRemember(text);
+      if (remember !== undefined) {
+        const card = makeCard({ text: remember, by: 'user' });
+        if (card !== undefined) void loadCards().then((cards) => saveCards([...cards, card])).catch(() => {});
+      }
+      void sessionStore.append({ kind: 'heard', text }).catch(() => {});
+      const memoryBlock = await memoryBlockFor(text).catch(() => '');
       // 从「收到话」到「开口」之间是空窗（模型要几秒）：先挂【在想】，开口那一刻撤（见 runSpeakTextInner）
       setEarPhase('think');
       const cfg = readAllConfig(configPaths);
@@ -4255,7 +4331,8 @@ export function apply(ctx: any): void {
       // 工具说明拼进 system，她需要查时只回一行 [[web_search: 查询词]]，宿主看见才真去搜。
       // 不查的时候一轮就结束：不多花模型调用，更不花网络。
       const searchOn = searchEnabled();
-      const baseSystem = petSystemPrompt(found) + (await recentSightBlock());
+      // 聊天不看屏幕笔记（哥哥 11-17 m24834）：只带自己的会话上下文 + 卡片
+      const baseSystem = petSystemPrompt(found) + memoryBlock;
       const system = searchOn ? baseSystem + '\n\n' + SEARCH_TOOL_HINT : baseSystem;
       // 配图：开关关闭 → 空池（指令与解析都不介入，与旧行为逐字一致）；目录链按所属条目取。
       // 张数上限（chatImageLimit，0 = 不限制）：整张清单每条消息都要附，截断后费用上限可控。
@@ -4325,7 +4402,10 @@ export function apply(ctx: any): void {
       setEarPhase('idle');
       dropHint('think');
       // 回复写进 S；有嗓子时气泡时长跟着音频走（见 sayWithVoice）
-      void sayWithVoice(petId, generated.text, generated.image, priorityFor(heard.level));
+      void sessionStore.append({ kind: 'said', text: generated.text }).catch(() => {});
+      void sayWithVoice(petId, generated.text, generated.image, priorityFor(heard.level)).then(() =>
+        sessionStore.rollIfNeeded().catch(() => undefined),
+      );
       // 同一份文本随返回值带出（叶子由 sayWithVoice 写，不是二选一）
       return { ok: true as const, text: generated.text, ...(generated.image ? { image: generated.image } : {}) };
     });
