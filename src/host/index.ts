@@ -4784,7 +4784,11 @@ export function apply(ctx: any): void {
     // 只 decode 一次（双重编码不许被二次解码，见 thumb 路由的不变式）
     const mappedPath = viaV1 ? `${ROUTE_PREFIX}/${rawPath.slice('/v1/'.length)}` : rawPath;
     const rest = decodeURIComponent(mappedPath.slice(ROUTE_PREFIX.length + 1));
-    if (viaV1) noteSense(`v1 alias rest=${rest} method=${method}`);
+    if (viaV1) {
+      const v1 = await handleV1Rest(rest, method, body);
+      if (v1 !== undefined) return v1;
+      noteSense(`v1 alias rest=${rest} method=${method}`);
+    }
 
     // /windows：列出能选的窗口（设置页「窗口」模式的下拉用，哥哥 11-16 m21257）
     if (rest === 'windows') {
@@ -6323,6 +6327,62 @@ export function apply(ctx: any): void {
    * 【汐儿 · 11-17 第 5 批】同一个 handler 挂两个前缀：内部 `/dsh-pet-7340`，对外 `/v1`。
    * 两条走的是同一份逻辑，差别只在门口那道鉴权（`/v1` 不在免令牌名单里，必须带 token）。
    */
+  /* 【汐儿 · 11-17 第 5 批补】`/v1` 对外门面：统一信封 `{ ok, data }` / `{ ok, error }`。
+   * 不是新的一套业务——全部落到同一份 handlePetRoute 上，只是形状和入口对外固定下来。
+   * 认不出的 /v1/* 仍然按别名落到内部路由，旧调用一律不断。 */
+  const v1Envelope = (result: RouteResult): RouteResult => {
+    if (result.kind !== 'json') return result;
+    const status = result.status ?? 200;
+    const ok = status < 400;
+    return {
+      kind: 'json',
+      status,
+      headers: result.headers,
+      obj: ok ? { ok: true, data: result.obj } : { ok: false, error: result.obj },
+    };
+  };
+  const v1Forward = async (target: string, method: string, body?: string): Promise<RouteResult> =>
+    v1Envelope(await handlePetRoute(`${ROUTE_PREFIX}/${target}`, method, body));
+  const V1_DO_ROUTES: Readonly<Record<string, string>> = {
+    anim: 'anim',
+    throw: 'throw',
+    lock: 'lock',
+    position: 'position',
+    lyric: 'lyric',
+  };
+  /** `/v1/events` 是流，只由 HTTP 侧 petRouteHandler 接；这里返回 undefined 表示「不认识」。 */
+  const handleV1Rest = async (
+    rest: string,
+    method: string,
+    body?: string,
+  ): Promise<RouteResult | undefined> => {
+    if (rest === 'state') return method === 'GET' ? v1Forward('state', 'GET') : { kind: 'json', status: 405, obj: { ok: false, error: 'method not allowed' } };
+    if (rest === 'config') return method === 'GET' || method === 'POST' ? v1Forward('config', method, body) : { kind: 'json', status: 405, obj: { ok: false, error: 'method not allowed' } };
+    if (rest === 'say') return method === 'POST' ? v1Forward('say', 'POST', body) : { kind: 'json', status: 405, obj: { ok: false, error: 'method not allowed' } };
+    if (rest === 'look') return method === 'POST' ? v1Forward('look', 'POST', body) : { kind: 'json', status: 405, obj: { ok: false, error: 'method not allowed' } };
+    // show：只冒泡，不出声（对应内部 /broadcast 的语义）
+    if (rest === 'show') return method === 'POST' ? v1Forward('broadcast', 'POST', body) : { kind: 'json', status: 405, obj: { ok: false, error: 'method not allowed' } };
+    if (rest === 'do') {
+      if (method !== 'POST') return { kind: 'json', status: 405, obj: { ok: false, error: 'method not allowed' } };
+      let kind = '';
+      try {
+        const parsed = JSON.parse(body ?? '{}') as { kind?: unknown };
+        kind = typeof parsed.kind === 'string' ? parsed.kind : '';
+      } catch {
+        kind = '';
+      }
+      const target = V1_DO_ROUTES[kind];
+      if (target === undefined) {
+        return { kind: 'json', status: 400, obj: { ok: false, error: 'do.kind 只收 anim / throw / lock / position / lyric' } };
+      }
+      return v1Forward(target, 'POST', body);
+    }
+    if (rest.startsWith('media/')) {
+      return method === 'GET' ? v1Forward(`thumb/${rest.slice('media/'.length)}`, 'GET') : { kind: 'json', status: 405, obj: { ok: false, error: 'method not allowed' } };
+    }
+    return undefined;
+  };
+
   const petRouteHandler = async (req: IncomingMessage, res: ServerResponse): Promise<void> => {
           // 挂起等待（/playback?wait=）期间调用方可能提前断开：据此中止等待，
           // 否则那个等待者要一直留到超时才回收。'close' 在正常应答后也会触发，但那时监听已摘掉。
@@ -6330,6 +6390,41 @@ export function apply(ctx: any): void {
           const onClose = (): void => abort.abort();
           res.on('close', onClose);
           try {
+            // `/v1/events`：SSE 事件流（每 1 秒推一次变化的 state，15 秒一个心跳注释行）
+            if ((req.url ?? '').split('?')[0] === '/v1/events') {
+              res.writeHead(200, {
+                'content-type': 'text/event-stream; charset=utf-8',
+                'cache-control': 'no-store',
+                connection: 'keep-alive',
+                'x-accel-buffering': 'no',
+              });
+              let last = '';
+              const push = async (): Promise<void> => {
+                const state = await handlePetRoute(`${ROUTE_PREFIX}/state`, 'GET');
+                if (state.kind !== 'json') return;
+                const text = JSON.stringify(state.obj);
+                if (text === last) return;
+                last = text;
+                if (!res.writableEnded) res.write(`event: state\ndata: ${text}\n\n`);
+              };
+              void push();
+              const tick = setInterval(() => {
+                void push();
+              }, 1_000);
+              tick.unref?.();
+              const beat = setInterval(() => {
+                if (!res.writableEnded) res.write(': ping\n\n');
+              }, 15_000);
+              beat.unref?.();
+              const stop = (): void => {
+                clearInterval(tick);
+                clearInterval(beat);
+              };
+              req.on('close', stop);
+              res.on('close', stop);
+              res.off('close', onClose);
+              return;
+            }
             const body = req.method === 'PUT' || req.method === 'POST' ? await readBody(req) : undefined;
             const result = await handlePetRoute(req.url ?? '/', req.method ?? 'GET', body, abort.signal);
             res.off('close', onClose);
