@@ -4752,7 +4752,14 @@ export function apply(ctx: any): void {
     signal?: AbortSignal,
   ): Promise<RouteResult> => {
     const url = new URL(rawUrl, 'http://localhost');
-    const rest = decodeURIComponent(url.pathname.slice(ROUTE_PREFIX.length + 1));
+    // 【汐儿 · 11-17 第 5 批】对外门面 `/v1/*`：第一版只做别名，内部路由一条不动。
+    // `/v1` 不在免令牌名单里，所以外部调用天然要带 x-dsh-pet-token。
+    const rawPath = url.pathname;
+    const viaV1 = rawPath.startsWith('/v1/');
+    // 只 decode 一次（双重编码不许被二次解码，见 thumb 路由的不变式）
+    const mappedPath = viaV1 ? `${ROUTE_PREFIX}/${rawPath.slice('/v1/'.length)}` : rawPath;
+    const rest = decodeURIComponent(mappedPath.slice(ROUTE_PREFIX.length + 1));
+    if (viaV1) noteSense(`v1 alias rest=${rest} method=${method}`);
 
     // /windows：列出能选的窗口（设置页「窗口」模式的下拉用，哥哥 11-16 m21257）
     if (rest === 'windows') {
@@ -6287,12 +6294,11 @@ export function apply(ctx: any): void {
     return { kind: 'file', file, contentType: MIME[servedExt] ?? 'application/octet-stream' };
   };
 
-  ctx.effect(
-    () =>
-      ctx.webServer.register({
-        kind: 'prefix',
-        path: ROUTE_PREFIX,
-        handler: async (req: IncomingMessage, res: ServerResponse) => {
+  /**
+   * 【汐儿 · 11-17 第 5 批】同一个 handler 挂两个前缀：内部 `/dsh-pet-7340`，对外 `/v1`。
+   * 两条走的是同一份逻辑，差别只在门口那道鉴权（`/v1` 不在免令牌名单里，必须带 token）。
+   */
+  const petRouteHandler = async (req: IncomingMessage, res: ServerResponse): Promise<void> => {
           // 挂起等待（/playback?wait=）期间调用方可能提前断开：据此中止等待，
           // 否则那个等待者要一直留到超时才回收。'close' 在正常应答后也会触发，但那时监听已摘掉。
           const abort = new AbortController();
@@ -6314,9 +6320,16 @@ export function apply(ctx: any): void {
               sendJson(res, 500, { error: e instanceof Error ? e.message : String(e) });
             }
           }
-        },
-      }),
+  };
+
+  ctx.effect(
+    () => ctx.webServer.register({ kind: 'prefix', path: ROUTE_PREFIX, handler: petRouteHandler }),
     'dsh-pet: /dsh-pet-7340 asset route',
+  );
+  // 对外门面：`/v1/say`、`/v1/state`、`/v1/look` 这些（别名，旧路由全部保留）
+  ctx.effect(
+    () => ctx.webServer.register({ kind: 'prefix', path: '/v1', handler: petRouteHandler }),
+    'dsh-pet: /v1 public route',
   );
 
   // 工作状态联动：监听 DSH 会话事件 → 聚合"当前活动状态"（WorkStatusStore → 展示快照）。

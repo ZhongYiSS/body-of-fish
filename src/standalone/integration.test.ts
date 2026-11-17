@@ -83,10 +83,16 @@ async function get(path: string): Promise<{ status: number; text: string; json: 
 describe('插件宿主半边在独立模式下跑起来了', () => {
   test('apply 注册了插件自己的路由前缀（独立模式不自己写路由表）', () => {
     const routes = context?.routes ?? [];
-    assert.equal(routes.length, 1, '当前插件只注册一条 prefix 路由；多出来的注册要在这里显式确认');
-    assert.equal(routes[0]?.kind, 'prefix');
-    assert.equal(routes[0]?.path, '/dsh-pet-7340');
-    assert.equal(typeof routes[0]?.handler, 'function');
+    // 11-17 第 5 批：内部前缀 + 对外 /v1 别名，两条都用同一个 handler
+    assert.equal(routes.length, 2, '内部 /dsh-pet-7340 与对外 /v1 各一条；再加要在这里显式确认');
+    assert.deepEqual(
+      routes.map((route: { path: string }) => route.path).sort(),
+      ['/dsh-pet-7340', '/v1'],
+    );
+    for (const route of routes) {
+      assert.equal(route.kind, 'prefix');
+      assert.equal(typeof route.handler, 'function');
+    }
   });
 
   test('/state 与 DSH 内同形（独立模式没有任何会话事件 → 叶子保持初始值）', async () => {
