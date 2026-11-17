@@ -149,7 +149,8 @@ describe('在听 / 在想：别的声音和气泡让路', () => {
   test('回话之前必须先撤状态（否则自己的闸把回话挡住 = 死锁）', () => {
     // 哥哥 m24151：一直【在想】、话说不出来。根因就是 chatWithPet 的回复走 normal，
     // 被 earMuted() 挡成 ear-busy → show() 不执行 → idle 永远不到。
-    const at = hostCode.indexOf("void sayWithVoice(petId, generated.text, generated.image);");
+    // 11-17 第 2 批：回话优先级改由事件等级换算（`priorityFor(heard.level)`），断言跟着改
+    const at = hostCode.indexOf("void sayWithVoice(petId, generated.text, generated.image, priorityFor(heard.level));");
     assert.ok(at > 0, '没找到对话回话的 sayWithVoice');
     const before = hostCode.slice(Math.max(0, at - 600), at);
     assert.match(before, /setEarPhase\('idle'\);/, '回话前没撤 ear 状态');

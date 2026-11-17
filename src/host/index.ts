@@ -242,6 +242,8 @@ import {
   type SpeakJob,
   type SpeakPriority,
 } from './core/speak-center';
+import { priorityFor } from './pipeline/level';
+import { describeEvent, makeEvent } from './pipeline/sense';
 import { createPetServices, ServiceError } from './core/create-pet-services';
 import { PET_CALL_IDENTITY } from './llm-call';
 import { parseStandaloneRuntime, probeStandalone } from './core/connection';
@@ -1412,6 +1414,14 @@ export function apply(ctx: any): void {
           }
         },
         bubble: async (text, opts) => {
+          // 【汐儿 · 11-17 第 2 批】陪伴是「看到」触发：产一条 seen（2 级），等级自带。
+          const seen = makeEvent({
+            kind: 'seen',
+            source: 'watch',
+            text,
+            ...(opts?.image === undefined ? {} : { imageName: opts.image }),
+          });
+          noteSense(describeEvent(seen));
           // 【汐儿 · 11-16】不再「先冒泡再说」：记下这句话，等音频真的开始由 runSpeakClip 写，
           // 气泡和声音同一个起点。合成慢就 400 毫秒后先冒一行占位，真出声时被正式气泡盖掉。
           if (!companionSpeaks) {
@@ -2410,6 +2420,19 @@ export function apply(ctx: any): void {
       void appendFile(join(dir, 'bubble.log'), `${new Date().toISOString()} ${line}\n`).catch(() => {});
     } catch {
       /* 记不了日志不能影响冒泡 */
+    }
+  };
+  /**
+   * 「听和看」的账本（【汐儿 · 11-17】第 2 批）：每条事件进来时记一行，
+   * 出问题时能一眼看出「谁产的、几级、走的哪条路」。等级由事件自带，想和嘴不许改。
+   */
+  const noteSense = (line: string): void => {
+    try {
+      const dir = join(userRoot, 'logs');
+      mkdirSync(dir, { recursive: true });
+      void appendFile(join(dir, 'sense.log'), `${new Date().toISOString()} ${line}\n`).catch(() => {});
+    } catch {
+      /* 记不了日志不能影响说话 */
     }
   };
   /**
@@ -4150,6 +4173,9 @@ export function apply(ctx: any): void {
   > =>
     withMemoryLock(async () => {
       touchUser();
+      // 【汐儿 · 11-17 第 2 批】等级由「听」这里定好交出去，想和嘴都不许改（哥哥批注三）。
+      const heard = makeEvent({ kind: 'heard', source: 'ear', text });
+      noteSense(describeEvent(heard));
       // 从「收到话」到「开口」之间是空窗（模型要几秒）：先挂【在想】，开口那一刻撤（见 runSpeakTextInner）
       setEarPhase('think');
       const cfg = readAllConfig(configPaths);
@@ -4249,7 +4275,7 @@ export function apply(ctx: any): void {
       setEarPhase('idle');
       dropHint('think');
       // 回复写进 S；有嗓子时气泡时长跟着音频走（见 sayWithVoice）
-      void sayWithVoice(petId, generated.text, generated.image);
+      void sayWithVoice(petId, generated.text, generated.image, priorityFor(heard.level));
       // 同一份文本随返回值带出（叶子由 sayWithVoice 写，不是二选一）
       return { ok: true as const, text: generated.text, ...(generated.image ? { image: generated.image } : {}) };
     });
