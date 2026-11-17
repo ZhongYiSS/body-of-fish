@@ -5,6 +5,7 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import { applyPatch, viewOf } from './pet-settings.ts';
+import { applyVoicePick, nextVoicePick, pickOf } from '../host/core/voice-presets.ts';
 
 type Dict = Record<string, unknown>;
 
@@ -78,5 +79,25 @@ describe('嗓子四块', () => {
     assert.equal(presets.edge?.model, 'zh-CN-XiaoxiaoNeural');
     assert.equal(presets.windows?.model, undefined);
     assert.equal((cfg.model as Dict).tts === undefined, false);
+  });
+
+  it('右键菜单的「状态：嗓子」按四块循环，别块的字段一路不丢（m26051）', () => {
+    assert.deepEqual(
+      ['model', 'tts', 'windows', 'edge'].map((pick) => nextVoicePick(pick as 'model')),
+      ['tts', 'windows', 'edge', 'model'],
+    );
+    let cfg = base();
+    cfg = applyVoicePick(cfg, 'model');
+    cfg = applyVoicePick(cfg, 'tts');
+    cfg = applyVoicePick(cfg, 'windows');
+    cfg = applyVoicePick(cfg, 'edge');
+    cfg = applyVoicePick(cfg, 'model');
+    assert.equal(pickOf(cfg, (cfg.model as Dict).tts), 'model');
+    const tts = (cfg.model as Dict).tts as Dict;
+    assert.equal(tts.protocol, undefined);
+    const presets = (cfg.voice as Dict).presets as Record<string, Dict>;
+    assert.equal(presets.tts?.protocol, 'sovits');
+    assert.equal(presets.windows?.protocol, 'system');
+    assert.equal(presets.edge?.protocol, 'edge');
   });
 });

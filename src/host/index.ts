@@ -242,6 +242,7 @@ import {
   type SpeakJob,
   type SpeakPriority,
 } from './core/speak-center';
+import { applyVoicePick, nextVoicePick, pickOf, voicePickWord } from './core/voice-presets';
 import { priorityFor } from './pipeline/level';
 import { describeEvent, makeEvent } from './pipeline/sense';
 import { createMind } from './pipeline/mind';
@@ -3457,6 +3458,24 @@ export function apply(ctx: any): void {
    * 为什么保留旧目标：切到「关」时只把 enabled 关掉、后端指向原样留着，
    * 再点一下回到本地/云时不用重新填地址——不然「关一下再开」就得重配一遍，太折腾。
    */
+  /**
+   * 【汐儿 · 11-17 m26051】右鍵菜单的「状态：嗓子」按四块循环：模型直连 → 本地 TTS → Windows → Edge → 回模型直连。
+   * 和设置页共用 `applyVoicePick`（同一份口径），切块时别块的地址/密钥/参考音一个不丢。
+   */
+  const cycleVoicePick = (): { ok: boolean; message?: string } => {
+    const found = findPetInstance(readAllConfig(configPaths), 'main');
+    const conf = (found?.conf ?? {}) as Record<string, unknown>;
+    const modelSection = conf.model;
+    const current = pickOf(conf, modelSection !== null && typeof modelSection === 'object' ? (modelSection as Record<string, unknown>).tts : undefined);
+    const next = nextVoicePick(current);
+    updateUserConfig((raw) => {
+      const applied = applyVoicePick(raw as Record<string, unknown>, next);
+      raw.model = applied.model as typeof raw.model;
+      raw.voice = applied.voice as typeof raw.voice;
+    });
+    return { ok: true, message: `嗓子换成「${voicePickWord(next)}」` };
+  };
+
   const cycleBackend = (capability: 'tts' | 'vision'): { ok: boolean; message?: string } => {
     const found = findPetInstance(readAllConfig(configPaths), 'main');
     const conf = (found?.conf ?? {}) as Record<string, unknown>;
@@ -3647,7 +3666,7 @@ export function apply(ctx: any): void {
       }
       // 状态那一层的「嗓子 / 眼睛」：点一下在 关 → 本地 → 云 → 关 之间循环
       case 'cycle-voice':
-        result = cycleBackend('tts');
+        result = cycleVoicePick();
         break;
       case 'cycle-vision':
         result = cycleBackend('vision');
@@ -3787,6 +3806,8 @@ export function apply(ctx: any): void {
       // 状态那一层的「嗓子 / 眼睛」要显示当前后端（关/本地/云），读的是同一条 model 配置
       vision: backendWordOf(parseModelConfig(whisperConf.model).vision),
       voice: backendWordOf(parseModelConfig(whisperConf.model).tts),
+      // 【汐儿 · 11-17 m26051】嗓子按四块显示（模型直连 / 本地 TTS / Windows / Edge）
+      voicePick: pickOf(whisperConf, parseModelConfig(whisperConf.model).tts),
       // 状态行（一级菜单上那句「陪伴 · 1 分钟 · 看过 3 次」）要的是真实计数：
       // ticks 是陪伴自己看的次数，lookCount 是手动点「看一眼」的次数。
       companionTicks: companion?.status().ticks ?? 0,

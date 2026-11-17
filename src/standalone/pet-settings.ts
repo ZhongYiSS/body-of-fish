@@ -14,6 +14,17 @@ import { existsSync, readFileSync } from 'node:fs';
 import { z } from 'zod';
 
 import { writePrivateJson } from './ai-storage';
+import {
+  VOICE_PICKS,
+  applyVoicePick,
+  pickOf,
+  pickByProtocol as pickByProtocolOf,
+  presetOf as voicePresetOf,
+  ttsFromPreset,
+  voiceFieldsOf,
+  type VoicePick,
+  type VoicePreset,
+} from '../host/core/voice-presets.ts';
 import { parseModelConfig, toConfigSection } from '../host/core/model-config';
 import { DEFAULT_DETAIL_PROMPT, DEFAULT_WATCH_PROMPT } from '../host/game-talk';
 import { DEFAULT_TUNING, normalizeTuning } from '../host/watch-mode';
@@ -29,13 +40,6 @@ const FAMILIES = ['candy', 'yahei', 'youyuan', 'kaiti', 'simsun', 'comic', 'syst
 const BACKENDS = ['off', 'local', 'remote'] as const;
 /** 发声协议：OpenAI 兼容 / GPT-SoVITS 的 /tts / Windows 自带离线语音 / Edge 在线朗读 */
 const VOICE_PROTOCOLS = ['openai', 'sovits', 'system', 'edge'] as const;
-/**
- * 【汐儿 · 11-17 第 5 批（三）】嗓子四块：模型直连 / 本地 TTS / Windows 系统 / Edge 在线。
- * 哥哥的原话：「云端和本地对嗓子来说不重要……应该直接改成四个子项目，并且保证切换后设置也会正确切换」。
- * 每块一套字段（`voice.presets`），切块只换当前生效的那套（写进 model.tts），别块的字段一个不丢。
- */
-export const VOICE_PICKS = ['model', 'tts', 'windows', 'edge'] as const;
-export type VoicePick = (typeof VOICE_PICKS)[number];
 const voicePresetSchema = z
   .object({
     endpoint: z.string().trim().max(512).optional(),
@@ -357,7 +361,7 @@ export function viewOf(config: unknown): Record<string, unknown> {
     voicePick: pickOf(root, modelSection.tts),
     voicePresets: (() => {
       const stored = asDict(asDict(root.voice)?.presets);
-      const current = presetOf(modelSection.tts);
+      const current = voicePresetOf(modelSection.tts);
       const pick = pickOf(root, modelSection.tts);
       const out: Record<string, VoicePreset> = {};
       for (const key of VOICE_PICKS) {
@@ -421,102 +425,6 @@ export function viewOf(config: unknown): Record<string, unknown> {
         : typeof root.whisperPrompt === 'string'
           ? root.whisperPrompt
           : '',
-  };
-}
-
-type VoicePreset = {
-  endpoint?: string;
-  model?: string;
-  baseUrl?: string;
-  apiKey?: string;
-  refAudioPath?: string;
-  promptText?: string;
-  protocol?: string;
-};
-
-/**
- * 嗓子段有两种形态：配置文件里是**扁的**（`{enabled, kind, endpoint, model, protocol}`），
- * 解析后是**嵌套的**（`{enabled, backend:{kind, endpoint, ...}}`）。这里统一取一份扁的字段。
- */
-function voiceFieldsOf(tts: unknown): VoicePreset {
-  const row = asDict(tts);
-  if (row === undefined) return {};
-  const backend = asDict(row.backend);
-  const src = backend ?? row;
-  const out: VoicePreset = {};
-  const put = (key: keyof VoicePreset, value: unknown): void => {
-    if (typeof value === 'string' && value !== '') out[key] = value;
-  };
-  put('endpoint', src.endpoint);
-  put('model', src.model);
-  put('baseUrl', src.baseUrl);
-  put('apiKey', src.apiKey);
-  put('refAudioPath', src.refAudioPath);
-  put('promptText', src.promptText);
-  put('protocol', src.protocol);
-  return out;
-}
-
-/** 只看协议反推属于哪一块（不看 voice.pick，用来判断"切之前用的是哪块"）。 */
-function pickByProtocol(tts: unknown): VoicePick {
-  const protocol = voiceFieldsOf(tts).protocol;
-  if (protocol === 'system') return 'windows';
-  if (protocol === 'edge') return 'edge';
-  if (protocol === 'sovits') return 'tts';
-  return 'model';
-}
-
-/** 从当前 tts 段反推它属于四块里的哪一块（老配置没写 voice.pick 时用）。 */
-function pickOf(root: Dict, tts: unknown): VoicePick {
-  const stored = asDict(root.voice)?.pick;
-  if (typeof stored === 'string' && (VOICE_PICKS as readonly string[]).includes(stored)) {
-    return stored as VoicePick;
-  }
-  const protocol = voiceFieldsOf(tts).protocol;
-  if (protocol === 'system') return 'windows';
-  if (protocol === 'edge') return 'edge';
-  if (protocol === 'sovits') return 'tts';
-  return 'model';
-}
-
-/** 把 tts 当前值拆成一套 preset（回显用）。 */
-function presetOf(tts: unknown): VoicePreset {
-  return voiceFieldsOf(tts);
-}
-
-/**
- * 把一套 preset 变成**配置文件形态**的 model.tts（扁的，和 toConfigSection 写出去的一致）。
- * 空字段不写，别把别的块的字段带过来。
- */
-function ttsFromPreset(pick: VoicePick, preset: VoicePreset): Record<string, unknown> {
-  const text = (key: keyof VoicePreset): string => (preset[key] ?? '').trim();
-  if (pick === 'model') {
-    return {
-      enabled: true,
-      kind: 'remote',
-      baseUrl: text('baseUrl'),
-      model: text('model'),
-      apiKey: text('apiKey'),
-    };
-  }
-  if (pick === 'tts') {
-    return {
-      enabled: true,
-      kind: 'local',
-      endpoint: text('endpoint'),
-      model: text('model'),
-      protocol: 'sovits',
-      refAudioPath: text('refAudioPath'),
-      promptText: text('promptText'),
-    };
-  }
-  // windows / edge：本机合成，不需要地址；音色名放 model
-  return {
-    enabled: true,
-    kind: 'local',
-    endpoint: '',
-    model: text('model'),
-    protocol: pick === 'windows' ? 'system' : 'edge',
   };
 }
 
@@ -780,32 +688,23 @@ export function applyPatch(config: Dict, patch: PetSettingsPatch): Dict {
   if (patch.voicePick !== undefined || patch.voicePresets !== undefined) {
     const voice = { ...(asDict(next.voice) ?? {}) };
     const pick: VoicePick = patch.voicePick ?? pickOf(next, asDict(next.model)?.tts);
-    voice.pick = pick;
     const stored = asDict(voice.presets) ?? {};
     const merged: Record<string, VoicePreset> = {};
-    for (const key of VOICE_PICKS) {
-      merged[key] = (asDict(stored[key]) ?? {}) as VoicePreset;
-    }
+    for (const key of VOICE_PICKS) merged[key] = (asDict(stored[key]) ?? {}) as VoicePreset;
+    const previous = pickByProtocolOf(asDict(next.model)?.tts);
+    const live = voicePresetOf(asDict(next.model)?.tts);
+    if (previous !== pick) merged[previous] = { ...live, ...(merged[previous] ?? {}) };
     if (patch.voicePresets !== undefined) {
       for (const key of VOICE_PICKS) {
         const incoming = patch.voicePresets[key];
-        if (incoming !== undefined) merged[key] = { ...merged[key], ...incoming } as VoicePreset;
+        if (incoming !== undefined) merged[key] = { ...(merged[key] ?? {}), ...incoming } as VoicePreset;
       }
     }
-    // 当前这一块用「正在生效的 tts」兜底：页面没送这块时，别把它写成空
-    const live = presetOf(asDict(next.model)?.tts);
-    // 切块之前用的那块，先把「正在生效的字段」快照回去——不然从 A 切到 B，A 的字段就丢了
-    const previous = pickByProtocol(asDict(next.model)?.tts);
-    if (previous !== pick) {
-      merged[previous] = { ...live, ...(merged[previous] ?? {}), ...(previous === pick ? live : {}) };
-    }
-    // 正在生效的那份做底（页面没送到的字段别丢），但**页面送来的值优先**
     merged[pick] = { ...live, ...(merged[pick] ?? {}) };
-    voice.presets = merged;
     const modelSection = { ...(asDict(next.model) ?? {}) };
     modelSection.tts = ttsFromPreset(pick, merged[pick]);
     next.model = modelSection as typeof next.model;
-    next.voice = voice;
+    next.voice = { ...voice, pick, presets: merged };
   }
   return next;
 }

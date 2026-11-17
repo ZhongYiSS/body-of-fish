@@ -23,6 +23,7 @@
 
 import { watchPaceCost, type WatchPace } from './watch-mode';
 import { WATCH_MODES, watchModeWord, type WatchMode } from './screen-target';
+import { voicePickWord, type VoicePick } from './core/voice-presets';
 
 /** 壳侧认的 owner（`shared-core.js` 的 `COMPANION_OWNER = "本鱼陪伴"`），不可改 */
 export const PET_MENU_OWNER = '本鱼陪伴';
@@ -81,8 +82,10 @@ export interface PetMenuState {
   searchEnabled?: boolean;
   /** 看图当前后端（眼睛那一项要显示 关/本地/云） */
   vision?: BackendWord;
-  /** 声音当前后端（嗓子那一项要显示 关/本地/云） */
+  /** 声音当前后端（老的「关/本地/云」；11-17 起嗓子按四块显示，保留兼容） */
   voice?: BackendWord;
+  /** 嗓子当前用哪块（模型直连 / 本地 TTS / Windows / Edge，哥哥 m26051） */
+  voicePick?: VoicePick;
   /** 陪伴已经看过几眼（本次开启以来累计） */
   companionTicks?: number;
   /** 「看一眼」手动点过几次（进程内累计） */
@@ -195,7 +198,7 @@ export function petMenuLabels(state: PetMenuState): string[] {
     // 【11-09 晚 哥哥 m16044】「陪伴 / 看一眼」的开关挪进各自的一级分支，
     //   一级分支标题直接写状态（壳按第一个全角冒号切，冒号前那段就是一级文字），
     //   这样不开状态层就能看见开没开、点一下就能开关。
-    `${STATE_PREFIX}嗓子 · ${modeWord(state.voice)}`,
+    `${STATE_PREFIX}嗓子 · ${state.voicePick === undefined ? modeWord(state.voice) : voicePickWord(state.voicePick)}`,
     `${STATE_PREFIX}眼睛 · ${modeWord(state.vision)}`,
     `${STATE_PREFIX}歌词 · ${state.lyricRunning ? '开' : '关'}`,
     // 【汐儿 · 11-11 m20199】联网查资料：哥哥说放状态子菜单里、默认开
