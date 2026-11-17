@@ -1,35 +1,39 @@
 import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { HANDOFF_MAX, handoffText } from './bridge-handoff.ts';
+import { HANDOFF_MAX, HANDOFF_TAIL, handoffHeader, handoffText, imageHandoffText } from './bridge-handoff.ts';
 
-describe('接入 DSH 时的交接文案（哥哥 11-09 选 A：身体只看、会话来说）', () => {
-  test('看一眼的描述包成一句，换行/多空格压平', () => {
-    assert.equal(
-      handoffText('look', '  窗口标题是「技术手册.md」\n\n左侧目录树在展开 '),
-      '（桌宠看了一眼屏幕：窗口标题是「技术手册.md」 左侧目录树在展开）',
-    );
+describe('接入 DSH 时的交接信封（11-17 加时间与转述声明）', () => {
+  const at = new Date(2026, 10, 17, 14, 32, 0);
+
+  test('三段：动作+时间 / 看到的内容 / 转述声明', () => {
+    const out = handoffText('look', '窗口标题是「技术手册.md」 左侧目录树在展开', at);
+    assert.equal(out, '（桌宠看了一眼屏幕 · 14:32）\n窗口标题是「技术手册.md」 左侧目录树在展开\n' + HANDOFF_TAIL);
   });
 
-  test('陪伴用另一句开头，别和手动看一眼混在一起', () => {
-    assert.equal(handoffText('watch', '刷网页'), '（桌宠陪你看了一会儿：刷网页）');
+  test('换行/多空格压平（一条消息最干净）', () => {
+    assert.equal(handoffText('watch', '刷网页\n\n  又点了一下', at), '（桌宠陪你看了一会儿 · 14:32）\n刷网页 又点了一下\n' + HANDOFF_TAIL);
   });
 
-  test('空描述（识图没说出来）→ 空串，调用方据此不投', () => {
-    assert.equal(handoffText('look', ''), '');
-    assert.equal(handoffText('watch', '   \n  '), '');
+  test('三种动作各有自己的说法，别混在一起', () => {
+    assert.match(handoffHeader('look', at), /看了一眼屏幕/u);
+    assert.match(handoffHeader('watch', at), /陪你看了一会儿/u);
+    assert.match(handoffHeader('image', at), /看过了这张图/u);
   });
 
-  test('超长描述封顶，末尾加省略号（不把整屏文字灌进会话）', () => {
-    const long = '字'.repeat(HANDOFF_MAX + 50);
-    const out = handoffText('look', long);
-    assert.equal(out.startsWith('（桌宠看了一眼屏幕：字'.slice(0, 10)), true);
-    assert.equal(out.endsWith('…）'), true);
-    assert.equal(out.length, '（桌宠看了一眼屏幕：'.length + HANDOFF_MAX + 2);
+  test('超长封顶，末尾加省略号', () => {
+    const out = handoffText('look', '字'.repeat(500), at);
+    assert.equal(out.split('\n')[1].length, HANDOFF_MAX + 1);
+    assert.equal(out.endsWith('…'), false); // 省略号在正文里，后面还有转述声明
+    assert.equal(out.split('\n')[1].endsWith('…'), true);
   });
 
-  test('刚好等于上限时不加省略号', () => {
-    const exact = '字'.repeat(HANDOFF_MAX);
-    assert.equal(handoffText('look', exact).endsWith('…）'), false);
+  test('空描述不投（调用方据此决定这次不说话）', () => {
+    assert.equal(handoffText('look', '   ', at), '');
+  });
+
+  test('图的描述也走同一封套', () => {
+    const out = imageHandoffText('一张报错截图', at);
+    assert.equal(out, '（桌宠看过了这张图 · 14:32）\n一张报错截图\n' + HANDOFF_TAIL);
   });
 });

@@ -125,7 +125,7 @@ import { automaticWhisperSchedule } from './whisper-policy';
 import { generateChat, generateChatViaGateway, type ChatMemoryMessage } from './chat';
 import { audioDurationMs } from './core/audio-duration';
 import { createModelGateway, type SessionChat } from './core/create-model-gateway';
-import { handoffText } from './core/bridge-handoff';
+import { handoffText, imageHandoffText } from './core/bridge-handoff';
 import { parseModelConfig, toConfigSection } from './core/model-config';
 import { configuredModel } from './model-selection';
 import { applyMemePool, limitPool, pickMeme, readMemePool } from './memes';
@@ -1417,7 +1417,7 @@ export function apply(ctx: any): void {
             try {
               const bridge = await refreshDshBridge();
               if (bridge.enabled && dshBridgeUrl !== '') {
-                await sayToDsh(dshBridgeUrl, `（桌宠看过了这张图：${description}）`);
+                await sayToDsh(dshBridgeUrl, imageHandoffText(description));
               }
             } catch (error) {
               debugTrace('[look] 描述塞回会话失败：' + (error instanceof Error ? error.message : String(error)));
@@ -2351,7 +2351,7 @@ export function apply(ctx: any): void {
         try {
           const bridge = await refreshDshBridge();
           if (bridge.enabled && dshBridgeUrl !== '') {
-            await sayToDsh(dshBridgeUrl, `（桌宠看过了这张图：${description}）`);
+            await sayToDsh(dshBridgeUrl, imageHandoffText(description));
           }
         } catch {
           /* 投递失败不影响本鱼已经说出口的那句 */
