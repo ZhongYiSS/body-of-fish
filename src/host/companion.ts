@@ -57,7 +57,8 @@ export const DEFAULT_INTERVAL_MS = 15_000;
 export const DEFAULT_IDLE_STOP_AFTER = 10;
 
 /** 默认看图指令：短、口语、像在旁边陪人。 */
-export const DEFAULT_PROMPT = '看图说一到两句，20 字以内，像在旁边陪人。';
+export const DEFAULT_PROMPT =
+  '一句话，20 字以内，像在旁边陪人：接他的话、说反应或心情，不是复述画面，也不念文件名和路径；没意思就只写 -。';
 
 /**
  * `look` 连续失败几次就自动停。
