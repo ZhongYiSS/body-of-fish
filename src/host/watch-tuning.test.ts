@@ -68,13 +68,21 @@ describe('提示词模板', () => {
     assert.equal(got, '甲 1 乙 {{b}}');
   });
 
-  test('默认那套是「即时陪伴」口径，含三组正反例与检索标记的说明', () => {
+  test('默认那套是「即时陪伴」口径，说话规矩用共用占位符（11-17 m26171）', () => {
     assert.ok(DEFAULT_WATCH_PROMPT.includes('一边看他屏幕一边随口搭话'));
     assert.ok(DEFAULT_WATCH_PROMPT.includes('{{bili}}'));
     assert.ok(DEFAULT_WATCH_PROMPT.includes('[[web_search:'));
-    assert.ok(DEFAULT_WATCH_PROMPT.includes('✗'));
-    assert.ok(DEFAULT_WATCH_PROMPT.includes('✓'));
+    // 说话规矩从「各写一套 ✗✓ 例子」改成引用共用的一份，两处不再漂
+    assert.ok(DEFAULT_WATCH_PROMPT.includes('{{style}}'));
+    assert.ok(!DEFAULT_WATCH_PROMPT.includes('✗'));
     assert.ok(!DEFAULT_WATCH_PROMPT.includes('{{story}}'));
+  });
+
+  test('默认那套渲染后，说话规矩真的替换进去了', () => {
+    const got = buildWatchPrompt({ ...BASE_INPUT, template: DEFAULT_WATCH_PROMPT });
+    assert.ok(!got.includes('{{style}}'));
+    assert.ok(got.includes('20 字以内'));
+    assert.ok(got.includes('闲聊'));
   });
 
   test('模板留空就用默认那套', () => {

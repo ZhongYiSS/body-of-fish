@@ -243,6 +243,7 @@ import {
   type SpeakPriority,
 } from './core/speak-center';
 import { applyVoicePick, nextVoicePick, pickOf, voicePickWord } from './core/voice-presets';
+import { STYLE_RULES } from './pipeline/style';
 import { priorityFor } from './pipeline/level';
 import { describeEvent, makeEvent } from './pipeline/sense';
 import { createMind } from './pipeline/mind';
@@ -2269,10 +2270,12 @@ export function apply(ctx: any): void {
   /** 拍一张全屏给识图看（「看一眼」与陪伴共用同一套截屏 + 识图服务，不各写一套） */
   // 【本鱼 · 11-01】识图提示词：哥哥要「看图的要求写清楚，回到 DSH 里才好用」——默认那套
   // 「一句话、20 字」只够气泡念；投进会话的描述要能看出程序、标题、关键文字和异常。
+  // 【汐儿 · 11-17 m26171】哥哥要「别念文件名」——问句里就不许问窗口标题的原文，
+  //   只让它判断「他在用什么软件、在干什么」，描述里自然就不会出现 xxx.ts。
   const LOOK_DETAIL_PROMPT =
-    '请看清楚这张图再回答：1) 是什么程序或界面、窗口标题是什么；2) 页面上主要区域的内容是什么；' +
-    '3) 关键文字、按钮、数字、状态（有就照实写，没有不要编）；4) 有没有异常、弹窗或需要注意的地方。' +
-    '用中文，200 字以内，分点写。';
+    '看一眼这张图，只回答三点，每点一行：1) 他在用什么软件、在干什么（说人话，例如「在改设置页」「在打游戏」）；'
+    + '2) 画面里能核对的具体东西：数字、按钮、报错的大意（不要念文件名和路径）；'
+    + '3) 有没有卡住、出错、在等。看不清就写「看不清」。200 字以内。';
   const lookOnce = async (): Promise<{ ok: boolean; message?: string }> => {
     // 【汐儿 · 11-15 23:16】一眼看**不再打断**正在说的话（哥哥定：陪伴、一眼看不该掐语音）。
     touchUser();
@@ -4353,7 +4356,8 @@ export function apply(ctx: any): void {
       // 不查的时候一轮就结束：不多花模型调用，更不花网络。
       const searchOn = searchEnabled();
       // 聊天不看屏幕笔记（哥哥 11-17 m24834）：只带自己的会话上下文 + 卡片
-      const baseSystem = petSystemPrompt(found) + memoryBlock;
+      // 【汐儿 · 11-17 m26171】说话规矩两处共用（聊天 + 陪伴），以前聊天一条没有 → 像客服
+      const baseSystem = petSystemPrompt(found) + memoryBlock + '\n\n' + STYLE_RULES;
       const system = searchOn ? baseSystem + '\n\n' + SEARCH_TOOL_HINT : baseSystem;
       // 配图：开关关闭 → 空池（指令与解析都不介入，与旧行为逐字一致）；目录链按所属条目取。
       // 张数上限（chatImageLimit，0 = 不限制）：整张清单每条消息都要附，截断后费用上限可控。

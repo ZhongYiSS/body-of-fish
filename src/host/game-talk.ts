@@ -51,6 +51,8 @@ export interface SceneArchive {
 
 export const SCENE_BRIEF_MAX = 200;
 
+import { STYLE_RULES } from './pipeline/style';
+
 export const DEFAULT_WATCH_PROMPT = [
   '{{persona}}',
   '',
@@ -75,12 +77,7 @@ export const DEFAULT_WATCH_PROMPT = [
   '4|现况：≤60 字，更新「他现在在干什么」，没变化就留空。',
   '7|要看细节：画面里有个东西你看不清又真想知道，就写要问的那一句（≤20 字）；不用就别写这行。',
   '',
-  '怎么说话——像人，不像复述：',
-  '- 像并排坐着随口一句：短句、有称呼、有情绪，别端着。',
-  '- ✗「你正在玩《泰拉瑞亚》，看起来很有意思」 ✓「哎这 boss 血条快满了，稳住」',
-  '- ✗「画面中有一个蓝色的窗口，里面有一些文字」 ✓「这行报错是缺依赖吧」',
-  '- ✗ 复述标题、念网址念路径、说「我看到了」；✓ 没意思就只写 -，一个字都别多。',
-  '- 只说一件具体的事：先说你看到的，再顺一句你的反应；别每句都用问句收尾。',
+  '{{style}}',
   '',
   '查不查，你自己定：',
   '- 拿不准、或者他要的东西你不知道，就只输出一行 [[web_search: 查询词]]（这一行本鱼会去执行，结果再交给你说人话）。',
@@ -244,6 +241,8 @@ export function buildWatchPrompt(input: WatchPromptInput): string {
     : DEFAULT_WATCH_PROMPT;
   return renderTemplate(template, {
     persona: input.persona,
+    // 【汐儿 · 11-17 m26171】说话规矩与聊天共用一份，不再各处自己写
+    style: STYLE_RULES,
     picture,
     window: input.window !== undefined && input.window.trim() !== ''
       ? `${input.window.trim()}（从窗口标题读到的，不一定准；和画面打架就以画面为准）`
