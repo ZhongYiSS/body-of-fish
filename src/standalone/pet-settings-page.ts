@@ -89,7 +89,9 @@ export const petSettingsPage = `<!doctype html>
 <label for="visionApiKey">云端 API 密钥 <span id="vision-key-state" class="hint">尚未读取</span></label>
 <input id="visionApiKey" type="password" autocomplete="new-password" maxlength="8192" placeholder="留空保留已保存的密钥">
 <label class="check"><input id="clearVisionApiKey" type="checkbox"> 清除识图自己的密钥（回落对话模型那把）</label>
-<p class="hint">本地 = 本机开着的识图服务（LM Studio、ollama 之类）；云端 = 可以单独填地址与密钥，两栏留空就沿用上面「对话模型」那一份。</p>
+<p class="hint">本地 = 本机开着的识图服务（LM Studio、ollama 之类）；云端 = 可以单独填地址与密钥，<b>默认跟随对话</b>——地址、模型名、密钥任一项留空，就用「对话模型」那一份。</p>
+<label for="visionHeaders">会话头（每行一条 <code>Key: Value</code>，只对这一项生效；留空 = 不带）</label>
+<textarea id="visionHeaders" rows="3" maxlength="4000" spellcheck="false" placeholder="x-whatever-key: 值"></textarea>
 </div>
 <div class="mpane" data-mpane="voice">
 <div class="vtabs" role="tablist">
@@ -114,6 +116,8 @@ export const petSettingsPage = `<!doctype html>
 <div class="pair"><label for="voiceStaleSec">排队过期（秒）</label><input id="voiceStaleSec" type="number" min="1" max="600" step="1"><span class="test-result">没轮到的句子超过这么久就作废，内容并进下一句</span></div>
 <div class="pair"><label for="voiceGapMs">句子间隔（毫秒）</label><input id="voiceGapMs" type="number" min="0" max="5000" step="100"><span class="test-result">两句之间停多久，0 = 不停</span></div>
 <p class="hint">音量只影响「放出来多大声」，不改合成。100 = 原声；0 = 静音（气泡照常）。Windows 自带语音没有音量参数，所以不是 100 时会改用系统媒体播放器播。</p>
+<label for="ttsHeaders">会话头（每行一条 <code>Key: Value</code>，只对「模型直连」生效；留空 = 不带）</label>
+<textarea id="ttsHeaders" rows="3" maxlength="4000" spellcheck="false" placeholder="x-whatever-key: 值"></textarea>
 <p class="hint">GPT-SoVITS 靠「参考音 + 它说的那句话」定音色，两个都要填、且必须对得上；标准接口不用管这两栏。「Windows 自带」离线免费、是机器音；「Edge 在线」不用填地址和 key、要联网。云端时接口地址与密钥可以单独填，留空就沿用对话模型那一份。</p>
 </div>
 </fieldset>
@@ -362,7 +366,7 @@ export const petSettingsScript = `
 
   function fillPet(data) {
     for (const id of ['name', 'fontFamily', 'corner', 'persona', 'visionMode', 'visionEndpoint', 'visionModel',
-      'visionBaseUrl', 'voiceMode', 'voiceProtocol', 'voiceEndpoint', 'voiceModel', 'voiceBaseUrl',
+      'visionBaseUrl', 'voiceHeaders', 'ttsHeaders', 'voiceMode', 'voiceProtocol', 'voiceEndpoint', 'voiceModel', 'voiceBaseUrl',
       'voiceRefAudio', 'voicePromptText', 'voiceVolume', 'voiceStaleSec', 'voiceGapMs',
       'earHotkey', 'peekHotkey', 'sayHotkey']) {
       const el = get(id); if (el && data[id] !== undefined) el.value = String(data[id]);
@@ -469,6 +473,7 @@ export const petSettingsScript = `
       visionMode: get('visionMode').value, visionEndpoint: get('visionEndpoint').value.trim(),
       visionModel: get('visionModel').value.trim(), voiceMode: get('voiceMode').value,
       visionBaseUrl: get('visionBaseUrl').value.trim(), clearVisionApiKey: get('clearVisionApiKey').checked,
+      visionHeaders: get('visionHeaders').value, ttsHeaders: get('ttsHeaders').value,
       voiceProtocol: get('voiceProtocol').value, voiceEndpoint: get('voiceEndpoint').value.trim(),
       voiceModel: get('voiceModel').value.trim(), voiceRefAudio: get('voiceRefAudio').value.trim(),
       voicePromptText: get('voicePromptText').value.trim(),

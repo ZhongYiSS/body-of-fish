@@ -137,6 +137,9 @@ const patchSchema = z
     // 【汐儿 · 11-16 m21833】提示气泡：位置偏移 + 字号
     // 【汐儿 · 11-16 m22720】不要 .int()：拖气泡预览算出来的是小数（如 12.4），
     // 一个 0.4 像素的小数会把整份设置判成无效。取整由 applyPatch 做。
+    /** 看图 / 声音各自的请求头（每行 Key: Value）；哥哥 11-17 m26607 */
+    visionHeaders: z.string().max(4000).optional(),
+    ttsHeaders: z.string().max(4000).optional(),
     hintX: z.number().finite().min(-400).max(400).optional(),
     hintY: z.number().finite().min(-400).max(400).optional(),
     hintSize: z.number().finite().min(10).max(22).optional(),
@@ -277,6 +280,19 @@ function firstPet(config: Dict | undefined): Dict | undefined {
   return asDict(pets[0]);
 }
 
+/** 小气泡默认位置（与宿主 HINT_DEFAULT_X/Y 同一档：哥哥 11-17 定的「脑袋右边一点点」） */
+const HINT_DEFAULT_X = -79;
+const HINT_DEFAULT_Y = -7;
+
+/** 把某个能力的请求头对象搓成页面多行框里的文本（`Key: Value`，一行一个） */
+function headerLines(capability: { backend: { kind: string; extraHeaders?: Record<string, string> } }): string {
+  const headers = capability.backend.extraHeaders;
+  if (headers === undefined) return '';
+  return Object.entries(headers)
+    .map(([key, value]) => `${key}: ${value}`)
+    .join('\n');
+}
+
 /** 把配置文件搓成页面用的扁平视图（未知/非法值一律回落到默认，页面永远能渲染） */
 export function viewOf(config: unknown): Record<string, unknown> {
   const root = asDict(config) ?? {};
@@ -370,8 +386,10 @@ export function viewOf(config: unknown): Record<string, unknown> {
       }
       return out;
     })(),
-    hintX: asInt(asDict(root.hint)?.x, 0, -400, 400),
-    hintY: asInt(asDict(root.hint)?.y, 0, -400, 400),
+    visionHeaders: headerLines(modelSection.vision),
+    ttsHeaders: headerLines(modelSection.tts),
+    hintX: asInt(asDict(root.hint)?.x, HINT_DEFAULT_X, -400, 400),
+    hintY: asInt(asDict(root.hint)?.y, HINT_DEFAULT_Y, -400, 400),
     hintSize: asInt(asDict(root.hint)?.size, 15, 10, 22),
     voiceStaleSec: asInt(asDict(root.voice)?.staleSec, 15, 1, 600),
     voiceGapMs: asInt(asDict(root.voice)?.gapMs, 500, 0, 5000),
@@ -431,6 +449,33 @@ export function viewOf(config: unknown): Record<string, unknown> {
 /** 只改白名单字段，其余原样保留（含 pets 里其他条目、注释型键、未识别的第三方键） */
 export function applyPatch(config: Dict, patch: PetSettingsPatch): Dict {
   const next: Dict = { ...config };
+  // 看图 / 声音各自的请求头（哥哥 11-17 m26607）：只对那个能力生效，写进 model.<能力>.extraHeaders
+  const headerPatch = (raw: string | undefined): Record<string, string> | undefined => {
+    if (raw === undefined) return undefined;
+    const map: Record<string, string> = {};
+    for (const line of raw.split(/\r?\n/u)) {
+      const at = line.indexOf(':');
+      if (at <= 0) continue;
+      const key = line.slice(0, at).trim();
+      const value = line.slice(at + 1).trim();
+      if (key === '' || value === '') continue;
+      map[key] = value;
+    }
+    return map;
+  };
+  const visionHeaders = headerPatch(patch.visionHeaders);
+  const ttsHeaders = headerPatch(patch.ttsHeaders);
+  if (visionHeaders !== undefined || ttsHeaders !== undefined) {
+    const model = asDict(next.model) ?? {};
+    const put = (name: 'vision' | 'tts', headers: Record<string, string> | undefined): void => {
+      if (headers === undefined) return;
+      const cap = asDict(model[name]) ?? {};
+      model[name] = { ...cap, extraHeaders: headers };
+    };
+    put('vision', visionHeaders);
+    put('tts', ttsHeaders);
+    next.model = model;
+  }
   const pets = Array.isArray(config.pets) ? [...(config.pets as unknown[])] : [];
   const pet: Dict = { ...(asDict(pets[0]) ?? {}) };
   pet.id = typeof pet.id === 'string' && pet.id !== '' ? pet.id : 'main';

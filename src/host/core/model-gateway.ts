@@ -51,7 +51,10 @@ export interface SpeakProtocolOptions {
 
 export type Backend =
   | { kind: 'session' }
-  | ({ kind: 'remote'; baseUrl: string; model: string; apiKey?: string } & SpeakProtocolOptions)
+  | ({ kind: 'remote'; baseUrl: string; model: string; apiKey?: string } & SpeakProtocolOptions & {
+      /** 这个能力自己的请求头（哥哥 11-17：声音/视觉各一个「会话头」），比全局的优先 */
+      extraHeaders?: Record<string, string>;
+    })
   | ({ kind: 'local'; endpoint: string; model?: string } & SpeakProtocolOptions);
 
 /** 某个能力的配置：开关 + 后端。 */

@@ -3252,6 +3252,9 @@ export function apply(ctx: any): void {
    */
   const hintItems = new Map<string, { id: string; text: string; kind: 'task' | 'event'; ttlMs?: number; at: number; until: number }>();
   /** 提示气泡的位置偏移与字号（设置页拖预览 / 滑杆写进配置，这里读出来跟着每帧带下去）。 */
+  /** 小气泡默认位置（哥哥 11-17 定的标准档）：脑袋右边一点点，和本机现用值一致 */
+  const HINT_DEFAULT_X = -79;
+  const HINT_DEFAULT_Y = -7;
   const hintStyle = (): { x: number; y: number; size: number } => {
     const conf = findPetInstance(readAllConfig(configPaths), 'main')?.conf;
     const raw = (conf?.hint ?? {}) as { x?: unknown; y?: unknown; size?: unknown };
@@ -3259,7 +3262,8 @@ export function apply(ctx: any): void {
       const n = Number(value);
       return Number.isFinite(n) ? Math.min(hi, Math.max(lo, Math.round(n))) : fallback;
     };
-    return { x: num(raw.x, 0, -400, 400), y: num(raw.y, 0, -400, 400), size: num(raw.size, 15, 10, 22) };
+    // 默认位置（哥哥 11-17 m26607）：「以我现在这个为标准，刚好在脑袋右边一点点」→ -79 / -7
+    return { x: num(raw.x, HINT_DEFAULT_X, -400, 400), y: num(raw.y, HINT_DEFAULT_Y, -400, 400), size: num(raw.size, 15, 10, 22) };
   };
   const flushHint = (): void => {
     const nowMs = Date.now();

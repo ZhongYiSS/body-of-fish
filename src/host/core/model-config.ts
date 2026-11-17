@@ -20,6 +20,8 @@ export interface RawCapability {
   endpoint?: unknown;
   model?: unknown;
   apiKey?: unknown;
+  /** 这个能力自己的请求头（对象或 "Key: Value" 多行文本都认）；哥哥 11-17 要的「会话头」 */
+  extraHeaders?: unknown;
   /** 发声协议（见 model-gateway.ts 的 SpeakProtocolOptions）：openai | sovits */
   protocol?: unknown;
   refAudioPath?: unknown;
@@ -30,6 +32,40 @@ export interface RawCapability {
 }
 
 const KINDS = new Set(['session', 'remote', 'local']);
+
+const HEADER_KEY = /^[A-Za-z0-9!#$%&'*+.^_`|~-]+$/u;
+export const HEADER_MAX = 16;
+export const HEADER_VALUE_MAX = 1024;
+
+/**
+ * 请求头归一化：对象或 `Key: Value` 多行文本都认，键非法/过多/过长一律丢掉。
+ * 为什么放这里：配置是手写的，设置页也只给一个多行框，解析只能有一处。
+ */
+export function normalizeHeaders(raw: unknown): Record<string, string> {
+  const out: Record<string, string> = {};
+  const put = (key: string, value: string): void => {
+    const name = key.trim();
+    const text = value.trim();
+    if (name === '' || text === '' || text.length > HEADER_VALUE_MAX) return;
+    if (!HEADER_KEY.test(name)) return;
+    if (Object.keys(out).length >= HEADER_MAX) return;
+    out[name] = text;
+  };
+  if (typeof raw === 'string') {
+    for (const line of raw.split(/\r?\n/u)) {
+      const at = line.indexOf(':');
+      if (at <= 0) continue;
+      put(line.slice(0, at), line.slice(at + 1));
+    }
+    return out;
+  }
+  if (raw !== null && typeof raw === 'object' && !Array.isArray(raw)) {
+    for (const [key, value] of Object.entries(raw as Record<string, unknown>)) {
+      if (typeof value === 'string') put(key, value);
+    }
+  }
+  return out;
+}
 
 function str(value: unknown): string {
   return typeof value === 'string' ? value.trim() : '';
@@ -68,7 +104,16 @@ function pickBackend(raw: RawCapability, fallbackKind: 'session' | 'local', capa
   const baseUrl = str(raw.baseUrl) || str(raw.endpoint);
   const model = str(raw.model);
   const apiKey = str(raw.apiKey);
-  return { kind: 'remote', baseUrl, model, ...(apiKey ? { apiKey } : {}), ...speak };
+  // 这个能力自己的请求头（哥哥 11-17「声音和视觉模型的会话头」）：只挂在 remote 上
+  const headers = normalizeHeaders(raw.extraHeaders);
+  return {
+    kind: 'remote',
+    baseUrl,
+    model,
+    ...(apiKey ? { apiKey } : {}),
+    ...(Object.keys(headers).length > 0 ? { extraHeaders: headers } : {}),
+    ...speak,
+  };
 }
 
 /** 单个能力：缺省项按默认（chat 开且走会话，其余关且本地）。 */
@@ -106,6 +151,8 @@ export function toConfigSection(config: ModelConfig): Record<string, Record<stri
       out.baseUrl = item.backend.baseUrl;
       out.model = item.backend.model;
       out.apiKey = item.backend.apiKey ?? '';
+      const headers = item.backend.extraHeaders;
+      if (headers !== undefined && Object.keys(headers).length > 0) out.extraHeaders = { ...headers };
     }
     if (item.backend.kind === 'local') {
       out.endpoint = item.backend.endpoint;

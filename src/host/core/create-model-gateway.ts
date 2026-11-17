@@ -272,7 +272,14 @@ function compatBackend(
     baseUrl,
     model: modelOf(backend),
     ...(backend.kind === 'remote' && backend.apiKey ? { apiKey: backend.apiKey } : {}),
-    ...(backend.kind === 'remote' ? { extraHeaders: extraHeaders?.(baseUrl) } : {}),
+    ...(backend.kind === 'remote'
+      ? {
+          extraHeaders: {
+            ...(extraHeaders?.(baseUrl) ?? {}),
+            ...(backend.extraHeaders ?? {}),
+          },
+        }
+      : {}),
   };
 }
 
