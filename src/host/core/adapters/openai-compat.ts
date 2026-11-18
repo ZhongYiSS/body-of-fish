@@ -75,6 +75,9 @@ export interface CompatOptions {
 
 // 哥哥 11-01：本地视觉模型（LM Studio 的 Qwen3-VL-8B）**冷启动一次要 50–60 秒**，
 // 60s 的默认超时正好卡在边上——「看一眼」时好时坏、还静默。放到 120s，冷启动也够。
+/** 值得等 1.5 秒再试一次的状态码（限流 + 网关抖动） */
+const RETRY_STATUS = new Set([429, 500, 502, 503, 504]);
+
 const DEFAULT_TIMEOUT_MS = 120_000;
 
 /** 拼 `{baseUrl}/chat/completions`：容忍结尾斜杠、容忍 baseUrl 已经带 `/v1` 或已带全路径。 */
@@ -178,7 +181,37 @@ async function postJson(
     const reason = error instanceof Error ? error.message : String(error);
     throw new ModelCallError('endpoint-down', `连不上 ${backend.baseUrl}：${reason}`);
   }
-  const raw = await response.text();
+  const firstRaw = await response.text();
+  let retried = false;
+  // 【11-18】429/5xx：等 1.5 秒重试一次。这一层还没开始读流，重试不会让她说两遍；
+  // 401/403 不重试（重试也一样错），网络断了也不重试（只是再等一遍超时）。
+  if (!response.ok && RETRY_STATUS.has(response.status)) {
+    retried = true;
+    await new Promise<void>((resolve) => {
+      const timer = setTimeout(resolve, 1_500);
+      timer.unref?.();
+    });
+    if (options.signal?.aborted === true) throw new ModelCallError('timeout', '这次调用被取消了');
+    try {
+      response = await fetchImpl(chatCompletionsUrl(backend.baseUrl), {
+        method: 'POST',
+        headers: withExtraHeaders(
+          {
+            'content-type': 'application/json',
+            ...(backend.apiKey?.trim() ? { authorization: `Bearer ${backend.apiKey.trim()}` } : {}),
+          },
+          backend.extraHeaders,
+        ),
+        body: JSON.stringify(body),
+        signal,
+      });
+    } catch (error) {
+      const reason = error instanceof Error ? error.message : String(error);
+      throw new ModelCallError('endpoint-down', `重试时连不上 ${backend.baseUrl}：${reason}`);
+    }
+  }
+  // 重试过才重新读；没重试直接用第一份（同一份 body 读两次会报 Body is unusable）
+  const raw = retried ? await response.text() : firstRaw;
   if (!response.ok) throw mapHttpError(response.status, raw);
   try {
     return JSON.parse(raw) as unknown;

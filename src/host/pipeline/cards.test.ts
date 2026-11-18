@@ -4,6 +4,7 @@ import assert from 'node:assert/strict';
 import {
   CARD_MAX,
   CARD_TEXT_MAX,
+  cardsChars,
   decayCards,
   makeCard,
   normalizeCardText,
@@ -47,7 +48,7 @@ describe('长期卡片', () => {
     assert.equal(floor[0]?.weight, 1);
   });
 
-  it('超 400 张：把最不重要的挑出来归档，顺序不乱', () => {
+  it('超上限：把最不重要的挑出来归档，顺序不乱', () => {
     const now = 5_000;
     const cards = Array.from({ length: CARD_MAX + 2 }, (_, index) => ({
       ...makeCard({ text: `第${index}条`, by: 'pet', at: now, id: `c${index}` })!,
@@ -57,5 +58,28 @@ describe('长期卡片', () => {
     const { keep, archive } = splitOverflow(cards, CARD_MAX);
     assert.equal(keep.length, CARD_MAX);
     assert.deepEqual(archive.map((card) => card.id).sort(), ['c0', 'c1']);
+  });
+
+  it('卡库上限以字数为主：条数没超、字超了也要裁（11-18 哥哥定的口径）', () => {
+    const now = 20_000;
+    const cards = Array.from({ length: 100 }, (_, index) => ({
+      ...makeCard({ text: `${index}`.padEnd(60, '字'), by: 'pet', at: now, id: `d${index}` })!,
+      weight: index < 5 ? 1 : 3,
+      lastUsedAt: index < 5 ? 1 : now,
+    }));
+    // 100 张 × 60 字 = 6000 字 > 3000 字上限，条数上限 2000 完全没到
+    assert.equal(cardsChars(cards), 6_000);
+    const { keep, archive } = splitOverflow(cards, CARD_MAX, 3_000);
+    assert.equal(archive.length, 50);
+    assert.ok(cardsChars(keep) <= 3_000);
+    assert.deepEqual(archive.slice(0, 2).map((card) => card.id).sort(), ['d0', 'd1']);
+  });
+
+  it('两个上限都没超就原样返回（不动数组）', () => {
+    const cards = [makeCard({ text: '白饭', by: 'pet' })!];
+    const split = splitOverflow(cards);
+    assert.equal(split.keep.length, 1);
+    assert.equal(split.archive.length, 0);
+    assert.notEqual(split.keep, cards);
   });
 });

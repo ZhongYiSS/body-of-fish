@@ -133,34 +133,37 @@ test('pickNext 先挑等级高的，同级挑老的', () => {
   assert.equal(second.next?.key, 'c');
 });
 
-test('speakBudgetMs：短句 15 秒起底，长句封顶 60 秒', () => {
-  assert.equal(speakBudgetMs(''), 15_000);
-  assert.equal(speakBudgetMs('好'), 15_000);
-  assert.equal(speakBudgetMs('啊'.repeat(40)), 15_000);
-  const mid = speakBudgetMs('啊'.repeat(120));
-  assert.ok(mid > 15_000 && mid < 60_000);
+test('speakBudgetMs：短句 12 秒起底，长句封顶 60 秒', () => {
+  // 11-18 23:40：哥哥问「20 秒会不会太长」——这道闸从「拿到活儿」就计时（含合成），
+  // 所以底是「10 秒余量 + 每字 400ms」，最矮 12 秒；它只决定「多久算卡死」，不决定她说多久。
+  assert.equal(speakBudgetMs(''), 12_000);
+  assert.equal(speakBudgetMs('好'), 12_000);
+  assert.equal(speakBudgetMs('啊'.repeat(40)), 26_000);
+  const mid = speakBudgetMs('啊'.repeat(80));
+  assert.ok(mid > 12_000 && mid <= 60_000);
   assert.equal(speakBudgetMs('啊'.repeat(1_000)), 60_000);
 });
 
-test('jobGuardMs：知道音频时长就按时长 + 5 秒，封顶 60 秒', () => {
-  assert.equal(jobGuardMs({ text: '你好', kind: 'say' }, 3_000), 8_000);
+test('jobGuardMs：知道音频时长就按时长 + 8 秒，下限 12 秒、封顶 60 秒', () => {
+  // 11-18 m27977：知道真实时长就按 时长 + 8 秒（合成 + 播放都算在里面），底 12 秒
+  assert.equal(jobGuardMs({ text: '你好', kind: 'say' }, 3_000), 12_000);
   assert.equal(jobGuardMs({ text: '你好', kind: 'say' }, 58_000), 60_000);
-  assert.equal(jobGuardMs({ text: '你好', kind: 'say' }, 500), 6_000);
+  assert.equal(jobGuardMs({ text: '你好', kind: 'say' }, 500), 12_000);
 });
 
 test('jobGuardMs：不知道时长按字数估', () => {
-  assert.equal(jobGuardMs({ text: '好', kind: 'say' }), 15_000);
-  assert.equal(jobGuardMs({ text: '好', kind: 'clip' }), 15_000);
+  assert.equal(jobGuardMs({ text: '好', kind: 'say' }), 12_000);
+  assert.equal(jobGuardMs({ text: '好', kind: 'clip' }), 12_000);
   assert.equal(jobGuardMs({ text: '啊'.repeat(1_000), kind: 'say' }), 60_000);
-  assert.equal(jobGuardMs({ text: '好', kind: 'say' }, Number.NaN), 15_000);
+  assert.equal(jobGuardMs({ text: '好', kind: 'say' }, Number.NaN), 12_000);
 });
 
-test('playGuardMs：出声阶段从开始播放算，音频时长 + 3 秒', () => {
-  assert.equal(playGuardMs(5_000), 8_000);
-  assert.equal(playGuardMs(500), 6_000);
-  assert.equal(playGuardMs(120_000), 123_000);
-  assert.equal(playGuardMs(), 60_000);
-  assert.equal(playGuardMs(Number.NaN), 60_000);
+test('playGuardMs：出声阶段从开始播放算，1.4 倍时长 + 6 秒、最低 12 秒', () => {
+  assert.equal(playGuardMs(5_000), 13_000);
+  assert.equal(playGuardMs(500), 12_000);
+  assert.equal(playGuardMs(120_000), 174_000);
+  assert.equal(playGuardMs(), 40_000);
+  assert.equal(playGuardMs(Number.NaN), 40_000);
   assert.equal(playGuardMs(10_000_000), 300_000);
 });
 

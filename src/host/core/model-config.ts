@@ -96,22 +96,24 @@ function pickBackend(raw: RawCapability, fallbackKind: 'session' | 'local', capa
   if (kind === 'session') return { kind: 'session' };
   // 发声协议只属于 tts：别的能力带上会让人误以为识图也能选 sovits
   const speak = capability === 'tts' ? speakOptions(raw) : {};
+  // 这个能力自己的请求头（哥哥 11-17「声音和视觉模型的会话头」）：哪个后端都留着，
+  // 本地时不用、切回云端立刻生效（11-19：原来只有 remote 读，切档位就丢）
+  const headers = normalizeHeaders(raw.extraHeaders);
+  const withHeaders = Object.keys(headers).length > 0 ? { extraHeaders: headers } : {};
   if (kind === 'local') {
     const endpoint = str(raw.endpoint) || str(raw.baseUrl);
     const model = str(raw.model);
-    return { kind: 'local', endpoint, ...(model ? { model } : {}), ...speak };
+    return { kind: 'local', endpoint, ...(model ? { model } : {}), ...speak, ...withHeaders };
   }
   const baseUrl = str(raw.baseUrl) || str(raw.endpoint);
   const model = str(raw.model);
   const apiKey = str(raw.apiKey);
-  // 这个能力自己的请求头（哥哥 11-17「声音和视觉模型的会话头」）：只挂在 remote 上
-  const headers = normalizeHeaders(raw.extraHeaders);
   return {
     kind: 'remote',
     baseUrl,
     model,
     ...(apiKey ? { apiKey } : {}),
-    ...(Object.keys(headers).length > 0 ? { extraHeaders: headers } : {}),
+    ...withHeaders,
     ...speak,
   };
 }
@@ -151,13 +153,14 @@ export function toConfigSection(config: ModelConfig): Record<string, Record<stri
       out.baseUrl = item.backend.baseUrl;
       out.model = item.backend.model;
       out.apiKey = item.backend.apiKey ?? '';
-      const headers = item.backend.extraHeaders;
-      if (headers !== undefined && Object.keys(headers).length > 0) out.extraHeaders = { ...headers };
     }
     if (item.backend.kind === 'local') {
       out.endpoint = item.backend.endpoint;
       out.model = item.backend.model ?? '';
     }
+    // 11-19：会话头两个后端都写回（本地时先存着，切回云端立刻生效；原来只在 remote 写，一切档位就丢）
+    const headers = 'extraHeaders' in item.backend ? item.backend.extraHeaders : undefined;
+    if (headers !== undefined && Object.keys(headers).length > 0) out.extraHeaders = { ...headers };
     // 发声协议回写：只在 tts 上出现；system/edge 只写协议名（它们不要地址和 key），
     // sovits 才带参考音那一套。别把默认值写脏。
     if (capability === 'tts' && item.backend.kind !== 'session') {

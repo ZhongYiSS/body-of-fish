@@ -120,7 +120,6 @@ import { resolveDshHome } from '@deepseek-ai/dsh-home-paths';
 import { dataDirIn } from './data-dir';
 import { credentialRef } from '@deepseek-ai/dsh-credentials';
 import { listBalanceProviders, queryBalance, registerBalanceProvider } from './balance/index';
-import { generateWhisper, generateWhisperViaGateway } from './whisper';
 import { automaticWhisperSchedule } from './whisper-policy';
 import { generateChat, generateChatViaGateway, type ChatMemoryMessage } from './chat';
 import { audioDurationMs } from './core/audio-duration';
@@ -157,6 +156,7 @@ import { parsePlaybackPath, parseWaitQuery, PlaybackStore } from './playback';
 import { PoseStore, normalizePoseInput } from './pose';
 import { SURFACE_TEXT, displayCovers, normalizeSurface, type Surface } from './surface';
 import {
+  invalidateConfigCache,
   findPetInstance,
   flattenPetList,
   ID_FORBIDDEN,
@@ -231,6 +231,7 @@ import { createSearchRunner, failedNote, parseToolCall, SEARCH_TOOL_HINT } from 
 import { pruneDir } from './retention';
 import { readTailLines } from './log-tail';
 import { looksLikeEcho } from './memory-echo';
+import { createVoicePlayer } from './core/voice-player';
 import { playbackWatchdogMs, systemPlayerCommand } from './core/sound-player';
 import { createLyricAgent } from './lyric-agent';
 import {
@@ -244,12 +245,15 @@ import {
 } from './core/speak-center';
 import { applyVoicePick, nextVoicePick, pickOf, voicePickWord } from './core/voice-presets';
 import { STYLE_RULES } from './pipeline/style';
-import { priorityFor } from './pipeline/level';
+import { MOUTH_QUEUE_MAX, priorityFor } from './pipeline/level';
 import { describeEvent, makeEvent } from './pipeline/sense';
 import { createMind } from './pipeline/mind';
-import { CARD_INJECT, makeCard, parseRemember, pickCards, splitOverflow, touchCards } from './pipeline/cards';
+import { CARD_INJECT, makeCard, normalizeCardText, parseRemember, pickCards, splitOverflow, touchCards } from './pipeline/cards';
 import type { Card } from './pipeline/cards';
-import { createSessionStore } from './pipeline/session';
+import { createSessionStore, ROLL_CHARS, type SessionStore } from './pipeline/session';
+import { appendScreen, dayOf, readScreens, screenBlock } from './pipeline/screens';
+import { isDuplicateThought, recentThoughts, shouldRecordThought } from './pipeline/thought';
+import { pickFallback, sayOncePrompt, tidySayOnce } from './pipeline/say-once';
 import { createPetServices, ServiceError } from './core/create-pet-services';
 import { PET_CALL_IDENTITY } from './llm-call';
 import { parseStandaloneRuntime, probeStandalone } from './core/connection';
@@ -1379,7 +1383,9 @@ export function apply(ctx: any): void {
             return '';
           }
           // 哥哥 11-09：看一眼也走同一个 30 分钟上下文 +「刚看到」，别和对话隔离开
-          const system = petSystemPrompt(now) + (await recentSightBlock());
+          // 【汐儿 · 11-18 m27977】屏幕想也要知道自己刚说过什么、哥哥刚说过什么，
+          // 否则她会对着屏幕反复说同一句（哥哥报的「重复的话」）。
+          const system = petSystemPrompt(now) + (await memoryBlockFor('陪伴')) + (await recentSightBlock());
           const history = await recentMessages();
           const pool =
             now.conf.chatImageEnabled === true
@@ -1603,13 +1609,6 @@ export function apply(ctx: any): void {
   const manualHwnd = (): number => {
     const value = watchSection().windowHwnd;
     return typeof value === 'number' && Number.isFinite(value) && value > 0 ? Math.round(value) : 0;
-  };
-  /** 识图与说话合成一次调用（哥哥 11-16 m21310：有些模型没有识图能力，交给用户自己选）。 */
-  const mergeLookEnabled = (): boolean => {
-    const conf = (findPetInstance(readAllConfig(configPaths), 'main')?.conf ?? {}) as Record<string, unknown>;
-    const model = (conf.model ?? {}) as Record<string, unknown>;
-    // 哥哥 11-16 m21452：「默认开，大部分人在用的都是带识图的模型」
-    return model.mergeLook !== false;
   };
   /** B站登录信息（看视频抓字幕用）；没填就是空串。 */
   const subtitleSessData = (): string => {
@@ -2028,10 +2027,14 @@ export function apply(ctx: any): void {
       debugTrace(
         `[watch] 笔记 #${meta.index} ${reply.imp}|${noteText}${reply.say === '' ? '' : ` 想说「${reply.say}」`}`,
       );
-      // 笔记落进当天记忆（独立 source，不混进对话上下文；日记那 300 字留给哥哥）
-      void memoryStore
-        .remember({ role: 'pet', text: `看到 ${hhmm(nowMs)} ${noteText}`, source: 'watch' })
-        .catch(() => {});
+      // 【11-18 待办第 2 条】笔记落进屏幕流水（`memory/screens/<日期>.jsonl`），
+      // 不再混进当天记忆：那边是「说了什么」，笔记只是「看到了什么」，只做 3 条注入。
+      void appendScreen(screensDir, {
+        at: nowMs,
+        app: fg.exe,
+        title: title === '' ? fg.title : title,
+        note: noteText,
+      }).catch(() => {});
       const sheetName = await saveWatchSheet(png, meta);
       const staleAt = Date.now() - meta.shotAtMs;
       const logBase = {
@@ -2310,7 +2313,7 @@ export function apply(ctx: any): void {
       const found = findPetInstance(readAllConfig(configPaths), 'main');
       if (!found) return fail('找不到桌宠配置');
       // 刚看到的那张图本身就是这次的话头；再带上最近 10 分钟的笔记（如果陪伴同时开着）
-      const system = petSystemPrompt(found) + (await recentSightBlock());
+      const system = petSystemPrompt(found) + (await memoryBlockFor('看一眼')) + (await recentSightBlock());
       const pool =
         found.conf.chatImageEnabled === true
           ? limitPool(memePoolFor(found.entry, found.conf), Number(found.conf.chatImageLimit))
@@ -2385,7 +2388,27 @@ export function apply(ctx: any): void {
    * 正在播的那条（普通播放，含对话/陪伴/桥）：记它什么时候开的、最晚该在什么时候结束。
    * 开新句前先看一眼，超过 deadline 还活着就当成卡死直接掐掉——不然它永远占着嗓子。
    */
-  let activePlay: { child: { kill: () => void }; startedAtMs: number; budgetMs: number } | null = null;
+  let activePlay: {
+    child: { kill: () => void };
+    startedAtMs: number;
+    budgetMs: number;
+    /** 正在播的临时音频；打断时连它的停旗标一起清 */
+    file: string;
+    /** 淡出用的停旗标文件：写一下，播放器自己把音量降到 0 再收（哥哥 11-18 m27977） */
+    stopFile: string;
+  } | null = null;
+  /**
+   * 常驻嗓子：一个养着 MediaPlayer 的 PowerShell，每句只多 ~200ms（现起要 1.7 秒）。
+   * 起不来就 `ready === false`，播放退回 ffplay。
+   */
+  const voicePlayer = createVoicePlayer();
+  // 开机就预热常驻嗓子：不然第一句话要等 PowerShell 起来（1.5 秒），字和声就错开了
+  ctx.effect(() => {
+    voicePlayer.warm();
+    return () => {
+      voicePlayer.dispose();
+    };
+  });
   /** 现在挂在屏幕上的那句气泡是谁写的（打断时要跟着收掉，别「没声音了字还挂着」）。 */
   let bubbleOwner: { petId: string; source: 'chat' | 'companion' } | null = null;
   /** 陪伴刚说出口、还没真正出声的那句话（等 runSpeakClip 播放开始时写气泡） */
@@ -2403,10 +2426,29 @@ export function apply(ctx: any): void {
     if (bump) epoch += 1;
     const playing = activePlay;
     activePlay = null;
-    try {
-      playing?.child.kill();
-    } catch {
-      /* 旧进程可能已经退了 */
+    // 【汐儿 · 11-18 m27977】哥哥要「淡出，不要硬切」：系统播放器一边播一边看停旗标，
+    // 看到就把音量分 10 步降到 0；这里只负责写旗标，0.9 秒还没收再硬杀（播放器卡死那档）。
+    if (playing !== null && playing.stopFile !== '') {
+      try {
+        writeFileSync(playing.stopFile, '1');
+      } catch {
+        /* 写不进去就交给下面的兜底 */
+      }
+      const child = playing.child;
+      const late = setTimeout(() => {
+        try {
+          child.kill();
+        } catch {
+          /* 已经退了 */
+        }
+      }, 900);
+      late.unref?.();
+    } else {
+      try {
+        playing?.child.kill();
+      } catch {
+        /* 旧进程可能已经退了 */
+      }
     }
     if (bubbleOwner !== null) {
       const owner = bubbleOwner;
@@ -2486,19 +2528,56 @@ export function apply(ctx: any): void {
       /* 记不了日志不能影响说话 */
     }
   };
+  /**
+   * 专项账本（11-18 待办第 7 条）：`mind.log`（两个想谁掐了谁）、`roll.log`（换卷与摘要）。
+   *
+   * 为什么分家：sense.log 是所有事件的时间线，一长就淹；查「刚才那句为什么被取消」
+   * 只需要看想的那几行。分出来不影响 sense.log 仍然全记一份。
+   */
+  const noteTo = (name: string, line: string): void => {
+    try {
+      const dir = join(userRoot, 'logs');
+      mkdirSync(dir, { recursive: true });
+      void appendFile(join(dir, `${name}.log`), `${new Date().toISOString()} ${line}\n`).catch(() => {});
+    } catch {
+      /* 记不了日志不能影响说话 */
+    }
+  };
 
   /** 两个「想」的并发表：同会话新顶旧，4/5 级掐别的会话（11-17 第 3 批） */
-  const mind = createMind({ log: noteSense });
+  const mind = createMind({
+    log: (line) => {
+      noteSense(line);
+      noteTo('mind', line);
+    },
+  });
+  /**
+   * 第 4 级「手动」（11-18 补）：他亲手点的、按的，比屏幕上正在跑的「想」要紧。
+   *
+   * 只做两件事：记一条 command 事件进账本；把正在跑的**屏幕想**掐掉（不动主聊天——
+   * 他点菜单不代表不想听完她正在回的那句话）。
+   */
+  const noteCommand = (source: 'menu' | 'hotkey' | 'bridge', text: string): void => {
+    const command = makeEvent({ kind: 'command', source, text });
+    noteSense(describeEvent(command));
+    const stopped = mind.cancel('screen', `manual-${source}`);
+    if (stopped > 0) noteTo('mind', `preempt screen=${stopped} by=${source}`);
+  };
+
   /**
    * 「屏幕想」：陪伴/一眼看的生成也登记进并发表（session='screen'，2 级）。
    * 4/5 级的手动动作来了会把它掐掉；底层支持 AbortSignal 的那条（网关）真掐，DSH 那条只登记。
    */
   const thinkOnScreen = async <T>(fn: (signal: AbortSignal) => Promise<T>): Promise<T> => {
     const run = mind.begin('screen', 2);
+    // 【11-18】屏幕想单独一盏灯（文档 9.9 的 think:screen）：看一眼 / 陪伴在动脑子时，界面上要能看出来。
+    // 主想仍然是 ear 那盏「【在想】」——两路分开，谁也盖不掉谁。
+    pushHint('thinkScreen', '【在看】', 'task');
     try {
       return await fn(run.signal);
     } finally {
       run.end();
+      dropHint('thinkScreen');
     }
   };
   /**
@@ -2556,6 +2635,12 @@ export function apply(ctx: any): void {
         if (settled) return;
         settled = true;
         clearWatchdog();
+        // 停旗标不清掉，下次同名字的文件（基本不会重名，但别留垃圾）
+        try {
+          rmSync(`${file}.stop`, { force: true });
+        } catch {
+          /* 没有就算了 */
+        }
         if (activePlay !== null && (current === null || activePlay.child === current)) activePlay = null;
         removeVoiceFile(file);
         resolve();
@@ -2570,11 +2655,22 @@ export function apply(ctx: any): void {
         resolve();
         return;
       }
+      /** 停旗标：系统播放器看到它就淡出收尾（打断用）。 */
+      const stopFile = `${file}.stop`;
       const fallback = (): void => {
-        // ffplay 起不来（机器上没装 ffmpeg）——换 Windows 自带播放，别一声不吭就没声。
-        const sys = systemPlayerCommand(file, mime, voiceVolume());
-        noteVoiceIssue(`ffplay 起不来，改用 Windows 自带播放器 | ${mime} ${audio.length}B`);
-        run(sys.command, sys.args, 'system');
+        // 系统播放器起不来（个别机器没有 WPF 组件）——退回 ffplay，别一声不吭就没声。
+        const volume = voiceVolume();
+        const ffplayBin =
+          process.env.DSH_PET_FFPLAY?.trim() ||
+          (existsSync('D:\\AI\\RVC\\工具\\ffmpeg\\ffplay.exe')
+            ? 'D:\\AI\\RVC\\工具\\ffmpeg\\ffplay.exe'
+            : 'ffplay');
+        noteVoiceIssue(`系统播放器起不来，改用 ffplay | ${mime} ${audio.length}B`);
+        run(
+          ffplayBin,
+          ['-nodisp', '-autoexit', '-loglevel', 'quiet', ...(volume < 100 ? ['-volume', String(volume)] : []), file],
+          'ffplay',
+        );
       };
       const expectedMs = audioDurationMs(audio);
       const budgetMs = playbackWatchdogMs(expectedMs);
@@ -2587,7 +2683,7 @@ export function apply(ctx: any): void {
         let failed = false;
         const child = spawn(command, args, { windowsHide: true, stdio: ['ignore', 'ignore', 'pipe'] });
         current = child;
-        activePlay = { child, startedAtMs, budgetMs };
+        activePlay = { child, startedAtMs, budgetMs, file, stopFile };
         // 「开始播」也留一行：卡死的时候至少能看出是「合成没出来」还是「合成出来了没播」。
         noteVoiceIssue(
           `start via=${via} ${mime} ${audio.length}B expected=${expectedMs}ms budget=${budgetMs}ms volume=${voiceVolume()}`,
@@ -2614,7 +2710,8 @@ export function apply(ctx: any): void {
         child.on('error', (err: Error) => {
           failed = true;
           noteVoiceIssue(`error via=${via} ${err.message} | ${mime} ${audio.length}B`);
-          if (via === 'ffplay') {
+          if (via === 'system') {
+            // 系统播放器起不来 → 退回 ffplay（11-15 外部用户报过没装 ffmpeg 的那类机器）
             fallback();
             return;
           }
@@ -2633,15 +2730,45 @@ export function apply(ctx: any): void {
           finish();
         });
       };
-      const ffplay =
-        process.env.DSH_PET_FFPLAY?.trim() ||
-        (existsSync('D:\\AI\\RVC\\工具\\ffmpeg\\ffplay.exe') ? 'D:\\AI\\RVC\\工具\\ffmpeg\\ffplay.exe' : 'ffplay');
-      const volume = voiceVolume();
-      run(
-        ffplay,
-        ['-nodisp', '-autoexit', '-loglevel', 'quiet', ...(volume < 100 ? ['-volume', String(volume)] : []), file],
-        'ffplay',
-      );
+      // 【汐儿 · 11-18 m27977】首选**常驻**的嗓子（core/voice-player.ts）：
+      // 它一直养着一个 MediaPlayer，每句只多 ~200ms；现起 PowerShell 要 1.7 秒，
+      // 每句都慢这么多，字和声就彻底错开了。它能一边播一边降音量，打断才是「淡出」。
+      // 常驻进程没起来（个别机器没有 WPF）→ 退回 ffplay：有声音比淡出要紧。
+      if (voicePlayer.ready && audio.length > 0) {
+        clearWatchdog();
+        const startedAtMs = Date.now();
+        // 常驻嗓子的「子进程」就是这个播放器本身：stopLoud 调 child.kill() 即 `voicePlayer.stop()`
+        activePlay = { child: { kill: () => voicePlayer.stop() }, startedAtMs, budgetMs, file, stopFile };
+        noteVoiceIssue(
+          `start via=daemon ${mime} ${audio.length}B expected=${expectedMs}ms budget=${budgetMs}ms volume=${voiceVolume()}`,
+        );
+        watchdog = setTimeout(() => {
+          noteVoiceIssue(`timeout via=daemon cost=${Date.now() - startedAtMs}ms expected=${expectedMs}ms stop`);
+          voicePlayer.stop();
+          fireStart();
+          finish();
+        }, budgetMs);
+        void voicePlayer
+          .play(file, voiceVolume(), () => setTimeout(fireStart, VOICE_START_DELAY_MS))
+          .then((result) => {
+            if (!result.ok) {
+              noteVoiceIssue(`daemon 播不出来，改用 ffplay | ${mime} ${audio.length}B`);
+              fallback();
+              return;
+            }
+            noteVoiceIssue(
+              `exit=0 via=daemon faded=${result.faded} cost=${result.endedAtMs - startedAtMs}ms ${mime} ${audio.length}B`,
+            );
+            finish();
+          })
+          .catch((error: unknown) => {
+            noteVoiceIssue(`daemon 出错 ${error instanceof Error ? error.message : String(error)}`);
+            finish();
+          });
+        return;
+      }
+      const sys = systemPlayerCommand(file, mime, voiceVolume(), stopFile);
+      run(sys.command, sys.args, 'system');
     });
   };
   /**
@@ -2733,7 +2860,15 @@ export function apply(ctx: any): void {
   const writeSayBubble = (
     petId: string,
     source: 'chat' | 'companion',
-    payload: { text: string; image?: string; duration?: number; imageDuration?: number },
+    payload: {
+      text: string;
+      image?: string;
+      duration?: number;
+      imageDuration?: number;
+      /** 第三方投喂用：常驻气泡 / 配一段动画（原 /services/bubble 的 sticky / anim） */
+      sticky?: boolean;
+      anim?: string;
+    },
   ): void => {
     // 【汐儿 · 11-17 m24756】主气泡**只装她说的话**：只在正在录音那几秒让位。
     // 等待反馈是「状态」，交给副气泡【在想】，不许往主气泡塞占位词。
@@ -2782,6 +2917,21 @@ export function apply(ctx: any): void {
   const voiceStaleMs = (): number => voiceNumber('staleSec', 15, 1, 600) * 1_000;
   /** 句与句之间的空隙，默认 0.5 秒（哥哥 11-15：太长会显得卡卡的） */
   const voiceGapMs = (): number => voiceNumber('gapMs', SAY_GAP_MS, 0, 5_000);
+  /** 读任意一段里的一个整数（带范围夹），坏值回默认 */
+  const sectionInt = (section: string, key: string, fallback: number, min: number, max: number): number => {
+    const conf = (findPetInstance(readAllConfig(configPaths), 'main')?.conf ?? {}) as Record<string, unknown>;
+    const raw = conf[section];
+    const value = raw !== null && typeof raw === 'object' ? (raw as Record<string, unknown>)[key] : undefined;
+    const n = typeof value === 'number' ? value : Number(value);
+    if (!Number.isFinite(n)) return fallback;
+    return Math.min(max, Math.max(min, Math.round(n)));
+  };
+  /** 换卷字数（11-18 待办第 5 条）：`context.rollChars`，没配就跟 session.ts 的 ROLL_CHARS 一致 */
+  const contextRollChars = (): number => sectionInt('context', 'rollChars', ROLL_CHARS, 800, 20_000);
+  /** 嘴边最多排几条：`mouth.queueMax`，没配就是 MOUTH_QUEUE_MAX */
+  const mouthQueueMax = (): number => sectionInt('mouth', 'queueMax', MOUTH_QUEUE_MAX, 1, 10);
+  /** 每轮注入几张卡：`context.cardInject`，没配就 5 */
+  const cardInjectCount = (): number => sectionInt('context', 'cardInject', CARD_INJECT, 1, 20);
 
   /**
    * 念一段话（仲裁中心内部专用）：**一句话一个气泡，按句依次冒**（哥哥 11-01）。
@@ -2857,6 +3007,8 @@ export function apply(ctx: any): void {
       const said = await jobs[i];
       if (!said) {
         // 合成失败是「有气泡没声音」的头号嫌疑，必须留痕；剩下的字一次写出去。
+        // 【11-18】嗓子打结：先让她说一句人话，再把剩下的字留给气泡
+        writeSayBubble(petId, source, { text: '嗓子打结了，我先写给你看。', duration: 2_000 });
         noteVoiceIssue(`synth-failed pet=${petId} src=${source} i=${i}/${sentences.length} say=${line.slice(0, 24)}`);
         if (myEpoch === epoch) {
           const left = sentences.slice(i).join('');
@@ -2886,6 +3038,12 @@ export function apply(ctx: any): void {
           return;
         }
         bubbleOwner = { petId, source };
+        // 【汐儿 · 11-18 m27977】上下文两边同步：她**真说出口**的每句话都在这一刻进卷。
+        // 以前只有对话那条路记一次整段（chatWithPet），陪伴 / 一眼看 / 说一句说的话一句都不进卷，
+        // 结果她在陪伴里刚说完什么，转头聊天完全不知道 —— 哥哥说的「会说重复的话」就是这么来的。
+        void sessionRef
+          ?.append({ kind: 'said', text: line })
+          .catch(() => undefined);
         writeSayBubble(
           petId,
           source,
@@ -2963,11 +3121,33 @@ export function apply(ctx: any): void {
     speakSpecs.delete(key);
     return spec;
   };
+  /**
+   * 【11-18 待办第 1 条】「想说没说」的账。
+   * `sessionStore` 在这个函数后面才建（读音如卷要等数据目录就位），所以先留一个晚绑定的引用；
+   * null 时直接跳过——宁可少记一笔，也不让记账把说话流程带崩。
+   */
+  let sessionRef: SessionStore | null = null;
+  let lastThought: { text: string; at: number } | null = null;
+  const rememberThought = (spec: SpeakSpec, reason: string | undefined): void => {
+    if (spec.kind !== 'say') return;
+    if (!shouldRecordThought(spec.priority, reason)) return;
+    const text = spec.text.trim();
+    if (text === '') return;
+    const nowMs = Date.now();
+    if (isDuplicateThought(lastThought, text, nowMs)) return;
+    lastThought = { text, at: nowMs };
+    const store = sessionRef;
+    if (store === null) return;
+    void store.append({ kind: 'thought', text, at: nowMs }).catch(() => {});
+    noteSpeak(`thought reason=${reason} chars=${Array.from(text).length}`);
+  };
   const dropSpeakJob = (key: string, outcome: SpeakOutcome): void => {
     const gone = speakSpecs.get(key);
     if (gone === undefined) return;
     speakSpecs.delete(key);
     noteSpeak(`drop key=${key} reason=${outcome.message ?? (outcome.interrupted === true ? 'interrupted' : 'dropped')}`);
+    // 丢掉的句子记一笔「想说没说」（只有 high 以上才记，碎碎念天天被丢，记了是噪音）
+    rememberThought(gone, outcome.message ?? (outcome.interrupted === true ? 'interrupted' : undefined));
     try {
       gone.settle?.(outcome);
     } catch {
@@ -3052,6 +3232,9 @@ export function apply(ctx: any): void {
       } catch {
         /* 回调出错不该把队列搞挂 */
       }
+      // 【11-18 缺口①】换卷检查放在这里，不是「聊天说完才查」——
+      // 陪伴 / 一眼看 / 碎碎念的发言也进卷，只在聊天里查会漏掉它们，卷会一直涨。
+      if (spec.kind === 'say') void sessionRef?.rollIfNeeded().catch(() => undefined);
       pumpSpeak();
     };
     const onGuard = (): void => {
@@ -3087,7 +3270,12 @@ export function apply(ctx: any): void {
         }
       }
     }
-    const decision = admitSpeak(speakActive === null ? null : asJob(speakActive), speakQueue, asJob(spec));
+    const decision = admitSpeak(
+      speakActive === null ? null : asJob(speakActive),
+      speakQueue,
+      asJob(spec),
+      mouthQueueMax(),
+    );
     if (!decision.accepted) {
       debugTrace(`[speak] 丢掉 ${spec.key}：${decision.reason ?? 'unknown'}`);
       noteSpeak(`reject key=${spec.key} priority=${spec.priority} reason=${decision.reason ?? 'unknown'}`);
@@ -3270,9 +3458,19 @@ export function apply(ctx: any): void {
     for (const [key, item] of hintItems) {
       if (item.until > 0 && nowMs >= item.until) hintItems.delete(key);
     }
+    // 【11-18】最多 4 行；挤爆时先丢 status（toast），再丢 watch，最后才动 say（文档 9.9）
+    const HINT_RANK: Record<string, number> = { status: 0, watch: 1, say: 2 };
     const items = [...hintItems.values()]
-      .sort((a, b) => (a.kind === b.kind ? a.at - b.at : a.kind === 'task' ? -1 : 1))
-      .slice(0, 6)
+      .sort((a, b) => {
+        const ka = a.kind === 'task' ? 0 : 1;
+        const kb = b.kind === 'task' ? 0 : 1;
+        if (ka !== kb) return ka - kb;
+        const ra = HINT_RANK[a.id] ?? 3;
+        const rb = HINT_RANK[b.id] ?? 3;
+        if (ra !== rb) return ra - rb;
+        return a.at - b.at;
+      })
+      .slice(0, 4)
       .map((item) => ({ id: item.id, text: item.text, kind: item.kind, at: item.at }));
     // 【汐儿 · 11-16 m21833】位置和字号跟着一起写：渲染层只管照着摆，不自己读配置。
     const style = hintStyle();
@@ -3303,6 +3501,9 @@ export function apply(ctx: any): void {
     listen: 60_000,
     ear: 60_000,
     think: 90_000,
+    // 【11-18 自查】屏幕想那盏灯也得有兜底：`thinkScreen` 只靠 dropHint 撤，
+    // 万一某次调用永远不结束，界面会一直挂着「【在看】」。
+    thinkScreen: 90_000,
     watch: 90_000,
     say: 90_000,
   };
@@ -3327,22 +3528,50 @@ export function apply(ctx: any): void {
     pushHint('status', text, 'event', Math.max(1_000, duration));
   };
 
-  /** 说一句：用配好的嗓子出声 + 同时冒气泡（点菜单的即时反馈） */
-  const sayOnceLines = [
-    '哥哥，本鱼在呢。',
-    '咕噜咕噜～本鱼在这儿。',
-    '泡泡冒出来啦，哥哥。',
-    '嗯？哥哥叫本鱼？',
-    '本鱼一直守着的哦。',
-    '听见啦，本鱼在听。',
-    '本鱼浮上来看一眼哥哥。',
-    '哥哥～本鱼没走开。',
-  ];
+  /** 最近三句「说一句」说的话（去重用） */
+  const recentSays: string[] = [];
+  /**
+   * 【11-18 待办第 4 条】说一句不再随机抽台词：读卷 + 看时辰，让模型随口一句。
+   * 8 秒抢不到就回落到按时辰挑的兜底台词——点了菜单必须出声，不能干等。
+   */
+  const sayOnceText = async (): Promise<string> => {
+    const nowMs = Date.now();
+    const found = findPetInstance(readAllConfig(configPaths), 'main');
+    if (found) {
+      try {
+        const context = await sessionStore.context(6);
+        const prompt = sayOncePrompt({
+          nowMs,
+          summary: context.summary,
+          recent: context.turns,
+          recentSaid: recentSays,
+        });
+        const system = petSystemPrompt(found) + '\n\n' + STYLE_RULES;
+        const ask = usesOwnModel(found.conf)
+          ? generateChatViaGateway(gatewayFor(found.conf), system, [], prompt, [], 8_000)
+          : generateChat(ctx, system, [], prompt, [], configuredModel(found.conf, 'chatModel'));
+        const timeout = new Promise<null>((resolve) => {
+          const timer = setTimeout(() => resolve(null), 8_000);
+          timer.unref?.();
+        });
+        const result = await Promise.race([ask, timeout]);
+        if (result !== null && result.ok) {
+          const said = tidySayOnce(result.text);
+          if (said !== '' && !recentSays.includes(said)) return said;
+        }
+      } catch {
+        /* 模型这条不通就走兜底，菜单点一下不能因为模型挂了没反应 */
+      }
+    }
+    return pickFallback(nowMs, recentSays);
+  };
   /** 说一句：用配好的嗓子出声 + 同时冒气泡（点菜单的即时反馈）——走仲裁，urgent */
   const speakOnce = async (): Promise<{ ok: boolean; message?: string }> => {
-    const text = sayOnceLines[Math.floor(Math.random() * sayOnceLines.length)];
     const voice = servicesProvider('main').voice.available();
     if (!voice.ready) return { ok: false, message: `声音后端没配好：${voice.reason?.message ?? '未知原因'}` };
+    const text = await sayOnceText();
+    recentSays.push(text);
+    while (recentSays.length > 3) recentSays.shift();
     const outcome = await centerSay({ text, priority: 'urgent', source: 'companion', petId: 'main', fallbackMs: 8_000 });
     return outcome.ok ? { ok: true } : { ok: false, message: outcome.message ?? '这句没念出来' };
   };
@@ -3359,6 +3588,8 @@ export function apply(ctx: any): void {
     const raw = (readUserConfig(configPaths) ?? {}) as Record<string, unknown>;
     mutate(raw);
     writeFileSync(configPaths.userFile, `${JSON.stringify(raw, null, 2)}\n`, 'utf8');
+    // 【11-18 10.5】写完立刻作废读盘缓存：同一毫秒内写完又读，光靠 mtime 分不出来
+    invalidateConfigCache();
   };
   /** 自动碎碎念的总开关：写在 `pets[].whisperEnabled`（实例级，和设置页那个勾是同一个值） */
   const setWhisperEnabled = (enabled: boolean): void => {
@@ -3550,6 +3781,8 @@ export function apply(ctx: any): void {
   const runPetMenuAction = async (label: string): Promise<void> => {
     const action = parsePetMenuLabel(label);
     if (!action) return;
+    // 【11-18】第 4 级：他亲手点的菜单项 → 记账 + 让屏幕想让路（打开菜单本身不算）
+    noteCommand('menu', label.slice(0, 24));
     let result: { ok: boolean; message?: string };
     switch (action.kind) {
       case 'look':
@@ -3984,6 +4217,14 @@ export function apply(ctx: any): void {
       ext: '.jsonl',
       log: (line) => console.log(line),
     }).catch(() => {});
+    // 屏幕流水也按 30 天 / 20MB 收（文档 5「落盘」）
+    void pruneDir(screensDir, {
+      now: Date.now(),
+      keepDays: 30,
+      maxBytes: 20 * 1024 * 1024,
+      ext: '.jsonl',
+      log: (line) => console.log(line),
+    }).catch(() => {});
     return () => {
       clearInterval(timer);
       clearInterval(autoTimer);
@@ -4082,9 +4323,12 @@ export function apply(ctx: any): void {
   // 旧的 `memory.json`（跨天累积的那份）**不再读写**：文件留原地不动，但里面的历史从此不参与上下文——
   // 哥哥要的就是「桌宠不要长期记忆」，历史想留着自己翻文件。
   const memoryStore: MemoryStore = createMemoryStore({ dir: join(userRoot, 'memory') });
+  /** 屏幕流水（11-18 待办第 2 条）：和「说了什么」分家，只做注入、不进对话历史 */
+  const screensDir = join(userRoot, 'memory', 'screens');
   // 【汐儿 · 11-17 第 4 批】换卷式上下文：卷满了（5000 字）就归档 + 摘要，旧卷不删。
   const sessionStore = createSessionStore({
     dir: join(userRoot, 'memory'),
+    maxChars: contextRollChars,
     summarize: async (prompt) => {
       const found = findPetInstance(readAllConfig(configPaths), 'main');
       if (found === undefined) return '';
@@ -4099,8 +4343,15 @@ export function apply(ctx: any): void {
       }
       return out;
     },
-    log: (line) => noteSense(line),
+    log: (line) => {
+      noteSense(line);
+      noteTo('roll', line);
+    },
+    // 【11-18 第 11 条】换完卷叫她自己记卡片（`by:'pet'`）；包一层箭头，免得踩 TDZ
+    remember: (turns) => rememberCards(turns),
   });
+  // 「想说没说」记账要用同一个卷（晚绑定，见 rememberThought）
+  sessionRef = sessionStore;
   // 长期卡片：他说「记住：…」或者设置页手填的，跨卷常驻
   let cardCache: Card[] | undefined;
   const cardsFile = join(userRoot, 'memory', 'cards.json');
@@ -4131,10 +4382,79 @@ export function apply(ctx: any): void {
       await writeFile(archiveFile, `${JSON.stringify({ cards: [...old, ...archive] }, null, 2)}\n`, 'utf8');
     }
   };
+  /**
+   * 换完卷，叫她自己记 1~2 张长期卡（`by:'pet'`，11-18 待办第 11 条）。
+   *
+   * 只挑「人、习惯、约定、梗」这类以后再聊会用到的；模型胡说或超时就算了，
+   * 不阻塞换卷，也不往卡库里塞垃圾（同一句话已经在卡里就跳过）。
+   */
+  const rememberCards = async (turns: readonly { kind: string; text: string }[]): Promise<void> => {
+    const spoken = turns
+      .filter((turn) => turn.kind !== 'heard')
+      .map((turn) => `${turn.kind === 'said' ? '你' : '他'}：${turn.text.replace(/\s+/gu, ' ').trim().slice(0, 80)}`)
+      .filter((line) => line.length > 4)
+      .slice(-12);
+    // 【11-18 缺口②】门槛从 4 句放宽到 2 句（哥哥：「条数放宽，限制字数即可」）——
+    // 短聊也有值得记的东西，卡库大小交给 CARD_MAX / CARD_TOTAL_CHARS 去管。
+    if (spoken.length < 2) return;
+    const found = findPetInstance(readAllConfig(configPaths), 'main');
+    if (found === undefined) return;
+    const prompt =
+      '下面是一段刚聊完的对话。请挑出最多两条以后再聊会用到的长期事实（他是谁、习惯、约定、梗），' +
+      '每条一行、不超过 30 字、不要编号不要解释；没有值得记的就输出一个「-」。\n\n' +
+      spoken.join('\n');
+    let out = '';
+    try {
+      if (usesOwnModel(found.conf)) {
+        for await (const frame of gatewayFor(found.conf).chat({
+          messages: [
+            { role: 'system', text: '你只从对话里摘长期事实，不写评价、不寒暄。' },
+            { role: 'user', text: prompt },
+          ],
+          signal: AbortSignal.timeout(12_000),
+        })) {
+          if (frame.type === 'text' && typeof frame.text === 'string') out += frame.text;
+          if (frame.type === 'error') return;
+        }
+      } else {
+        // 转给 DSH 的模型时自己没有网关，借宿主的聊天口（11-18 缺口②：这条路原来直接 return，
+        // 卡片永远是 0 张）
+        const result = await generateChat(
+          ctx,
+          '你只从对话里摘长期事实，不写评价、不寒暄。',
+          [],
+          prompt,
+          [],
+          configuredModel(found.conf, 'chatModel'),
+        );
+        if (result.ok !== true) return;
+        out = result.text;
+      }
+    } catch {
+      return;
+    }
+    const lines = out
+      .split('\n')
+      .map((line) => line.replace(/^[-\d.、*\s]+/gu, '').trim())
+      .filter((line) => line !== '' && line !== '-')
+      .slice(0, 2);
+    if (lines.length === 0) return;
+    const cards = await loadCards();
+    const known = new Set(cards.map((card) => normalizeCardText(card.text)));
+    const fresh = lines
+      .filter((line) => !known.has(normalizeCardText(line)))
+      .map((line) => makeCard({ text: line, by: 'pet' }))
+      .filter((card): card is NonNullable<typeof card> => card !== undefined);
+    if (fresh.length === 0) return;
+    await saveCards([...cards, ...fresh]);
+    noteSense(`cards pet +${fresh.length} ${fresh.map((card) => card.text.slice(0, 12)).join(' / ')}`);
+  };
+
   /** 这一段的摘要 + 最近几条 + 挑中的卡片，拼成系统提示词末尾的一块 */
   const memoryBlockFor = async (text: string): Promise<string> => {
+    // 【11-18 第 13 条】不传 limit = 整卷（≤5,000 字，换卷时已经卡住），不再只给最近 10 条
     const [context, cards] = await Promise.all([sessionStore.context(), loadCards()]);
-    const picked = pickCards(cards, text, CARD_INJECT);
+    const picked = pickCards(cards, text, cardInjectCount());
     if (picked.length > 0) void saveCards(touchCards(cards, picked, Date.now())).catch(() => {});
     const lines: string[] = [];
     if (lines.length === 0) lines.push('（下面是背景，不是他现在说的话；知道就行，别照念。）');
@@ -4142,8 +4462,16 @@ export function apply(ctx: any): void {
     if (context.turns.length > 0) {
       lines.push(
         '【刚聊过】' +
-          context.turns.map((turn) => `${turn.kind === 'said' ? '你' : '他'}：${turn.text}`).join(' / '),
+          context.turns
+            .filter((turn) => turn.kind !== 'thought')
+            .map((turn) => `${turn.kind === 'said' ? '你' : '他'}：${turn.text}`)
+            .join(' / '),
       );
+    }
+    // 【刚才想说没说】只在 30 分钟内、最多 3 条——让她知道自己刚才有话没说出来
+    const thoughts = recentThoughts(context.turns, Date.now());
+    if (thoughts.length > 0) {
+      lines.push('【刚才想说没说】' + thoughts.join(' / '));
     }
     if (picked.length > 0) {
       lines.push('【记着的事（这些是以前记下的，不是他刚说的）】' + picked.map((card) => card.text).join('；'));
@@ -4194,23 +4522,10 @@ export function apply(ctx: any): void {
    *  直接混进历史，她会变成报菜名。所以这里只拼进 system，绝不写进 messages。 */
   const SIGHT_WINDOW_MS = 10 * 60 * 1000;
   const recentSightBlock = async (nowMs: number = Date.now()): Promise<string> => {
-    const turns = (await memoryStore.today(200)).filter(
-      (t) => t.source === 'watch' && nowMs - t.at <= SIGHT_WINDOW_MS,
-    );
-    if (turns.length === 0) return '';
-    // 【汐儿 · 11-16 夜 m24648】只留**最新 3 条**：10 分钟能有十几条笔记，
-    // 全塞进去她就开始报菜名；而且那些字会被她照念出来（见 memory-echo.ts）。
-    const lines = turns
-      .slice(-3)
-      .map((t) => `- ${hhmm(t.at)} ${t.text.replace(/^(?:看护|看到)\s+\d{1,2}:\d{2}\s*/u, '')}`)
-      .join('\n');
-    return (
-      `\n\n【你刚才在屏幕上看到的（这是你自己看到的，不是用户说的）】\n${lines}\n` +
-      '（这些不是他说的、也不是别人转告的，是你自己瞄到的。他问「你能看见吗 / 刚才在看什么」就直接说' +
-      '「看见你在……」并举一条具体的；他没问就别硬聊屏幕。' +
-      '**屏幕上的字句不要照抄、不要念出来**——报错、清单、测试结果、待办都是别人的活儿，' +
-      '你要用自己的话讲一句「你在做什么」就够了。逐条念出来会像播报。）'
-    );
+    // 【11-18 待办第 2 条】改读屏幕流水；只取最新 3 条、10 分钟窗口（拼块和文案都在 pipeline/screens.ts）
+    const notes = await readScreens(screensDir, dayOf(nowMs));
+    if (notes.length === 0) return '';
+    return screenBlock(notes, nowMs, SIGHT_WINDOW_MS, 3);
   };
 
   /** 把一次读写封进串行队列（同进程内防交错），返回 fn 的结果 */
@@ -4295,37 +4610,11 @@ export function apply(ctx: any): void {
     // 哥哥的原话是「只走本地，用户可以自己写入（桌宠只负责在池子里抽卡）」——所以这里
     // 绝不能回落成模型生成：那样既是"偷偷花钱"，也让"我明明关了 AI 它还在说话"变成怪事。
     // 插件模式（ctx.standaloneAi 不存在）保持老行为不动：那边一直是主人自己配的会话模型。
-    if (ctx.standaloneAi) {
-      return { ok: false, reason: 'empty-pool', message: '碎碎念池里没有可用的句子' };
-    }
-    const system = petSystemPrompt(found);
-    // 配图：全局开关关闭 / 池为空 / 池内图片全缺失 → 纯文本（不报错，退化为原行为）
-    const meme =
-      found.conf.whisperImageEnabled === true
-        ? pickMeme(memePoolFor(found.entry, found.conf))
-        : undefined;
-    // 模型：条目配置的 whisperModel 优先（留空 = 不指定）；生成侧失败会回落到当前对话的模型重试一次
-    const result = usesOwnModel(found.conf)
-      ? await generateWhisperViaGateway(gatewayFor(found.conf), system, meme)
-      : await generateWhisper(ctx, system, meme, configuredModel(found.conf, 'whisperModel'));
-    if (!result.ok) {
-      // 失败**不写 S**（与改造前一致：静默跳过 + console.warn，不伪造文案、不弹错误气泡）
-      console.warn(
-        '[dsh-pet] 碎碎念生成失败 pet=' +
-          petId +
-          ' reason=' +
-          result.reason +
-          (result.message ? ' ' + result.message : ''),
-      );
-      // 真实 reason **原样带回**给调用方。改造前这里只回布尔值，路由只能把失败硬编码成
-      // `generate-error`——独立模式下 `generateWhisper` 明明算出了 `provider-missing`，
-      // 却在边界被吞掉（API.md 描述的降级 reason 正是它）。
-      return result;
-    }
-    epoch += 1; // 模型兜底也是「立刻说」：推一代压掉还在排队的气泡
-    writeSayNow(petId, result.image ? { text: result.text, image: result.image } : { text: result.text });
-    // 文本随返回值带出，且与刚写进叶子的**是同一个变量**：两条出口给同一份文本，不是一个真相两个版本
-    return { ok: true, text: result.text, ...(result.image ? { image: result.image } : {}) };
+    // 【11-18 收口】碎碎念**两种模式都到此为止**：池空就安静，不回落模型。
+    // 哥哥的原话「碎碎念就是个单纯的本地计时冒泡的」——它是 1 级（最不重要），
+    // 花 token 让模型编一句嘟囔，既不值当，也让「我关了 AI 它还在说话」变成怪事。
+    // 池文件坏了 / 没写，回 empty-pool 让人一眼看出原因（别静默成功）。
+    return { ok: false, reason: 'empty-pool', message: '碎碎念池里没有可用的句子' };
   };
 
   /** 与某只宠物对话：截取最近记忆 → 生成回复 → 写入记忆 → 把回复写进 S 的 pets.<id>.say。
@@ -4459,11 +4748,9 @@ export function apply(ctx: any): void {
       //（ear-busy，不出声也不冒泡）→ show() 永远不执行 → 状态永远停在【在想】= 死锁。
       setEarPhase('idle');
       dropHint('think');
-      // 回复写进 S；有嗓子时气泡时长跟着音频走（见 sayWithVoice）
-      void sessionStore.append({ kind: 'said', text: generated.text }).catch(() => {});
-      void sayWithVoice(petId, generated.text, generated.image, priorityFor(heard.level)).then(() =>
-        sessionStore.rollIfNeeded().catch(() => undefined),
-      );
+      // 回复由 runSpeakTextInner 在**每句真的开播**时逐句写卷（11-18 m27977 统一口径），
+      // 这里不再整段再记一次，否则卷里每条回复都会出现两遍。
+      void sayWithVoice(petId, generated.text, generated.image, priorityFor(heard.level));
       // 同一份文本随返回值带出（叶子由 sayWithVoice 写，不是二选一）
       return { ok: true as const, text: generated.text, ...(generated.image ? { image: generated.image } : {}) };
     });
@@ -5030,16 +5317,17 @@ export function apply(ctx: any): void {
 
       if (rest === 'services/bubble') {
         try {
-          const handle = await services.bubble.say({
-            petId,
-            text: typeof parsed.text === 'string' ? parsed.text : '',
-            image: typeof parsed.image === 'string' ? parsed.image : undefined,
-            duration: parsed.duration === undefined ? undefined : Number(parsed.duration),
-            sticky: parsed.sticky === true,
-            anim: typeof parsed.anim === 'string' ? parsed.anim : undefined,
-            source: 'dsh',
+          // 【11-18 待办第 10 条】原来直调 services.bubble.say，绕开了「主气泡只有嘴能写」，
+          // 在听的时候也能抢。现在统一走 writeSayBubble（受「在听」闸），叶子还是同一片。
+          const said = typeof parsed.text === 'string' ? parsed.text : '';
+          writeSayBubble(petId, 'chat', {
+            text: said,
+            ...(typeof parsed.image === 'string' ? { image: parsed.image } : {}),
+            ...(parsed.duration === undefined ? {} : { duration: Number(parsed.duration) }),
+            ...(parsed.sticky === true ? { sticky: true } : {}),
+            ...(typeof parsed.anim === 'string' ? { anim: parsed.anim } : {}),
           });
-          return { kind: 'json', status: 200, obj: { ok: true, id: handle.id } };
+          return { kind: 'json', status: 200, obj: { ok: true, id: `say-${Date.now()}` } };
         } catch (error) {
           return failed(error);
         }
@@ -5092,6 +5380,8 @@ export function apply(ctx: any): void {
       if (!found) return { kind: 'json', status: 404, obj: { error: `unknown pet: ${petId}` } };
       // servicesProvider 里已经做了 fillCloudBackend（云端留空 → 沿用 AI 设置那一份）
       const services = servicesProvider(petId);
+      // 【11-18】手动看一眼 = 4 级：先把正在跑的屏幕想掐掉，免得一会儿两句一起冒
+      noteCommand('hotkey', '看一眼');
       const file = typeof parsedLook.file === 'string' ? parsedLook.file.trim() : '';
       if (!file) return { kind: 'json', status: 400, obj: { ok: false, error: 'file 必填（本地图片的绝对路径）' } };
       if (!existsSync(file)) return { kind: 'json', status: 404, obj: { ok: false, error: `图片不存在：${file}` } };
@@ -5143,6 +5433,8 @@ export function apply(ctx: any): void {
       const found = findPetInstance(readAllConfig(configPaths), petId);
       if (!found) return { kind: 'json', status: 404, obj: { error: `unknown pet: ${petId}` } };
       touchUser();
+      // 【11-18】第 4 级：桥/听.py 让他「说一句」，屏幕想先让路
+      noteCommand('bridge', clipped.slice(0, 20));
       // 【汐儿 · 11-16 晚 m24524】这里**不再**按「在听/在想」让路。
       // 让路本意是挡「外面的声音」，可 听.py 的回话走的正是 /say-loud：
       // 它 emit reply 与这条请求几乎同刻，ear.js 的 idle 消息常晚一拍 →
@@ -5806,6 +6098,11 @@ export function apply(ctx: any): void {
       const o = parsed && typeof parsed === 'object' ? (parsed as Record<string, unknown>) : {};
       const phase = o.phase === 'listen' ? 'listen' : o.phase === 'think' ? 'think' : 'idle';
       setEarPhase(phase);
+      // 【11-18】按 Alt+T 开录 = 4 级手动：屏幕想让路，别在她听你说话时插嘴
+      if (phase === 'listen') noteCommand('hotkey', '听一句');
+      // 【11-18】听不清 / 没录到东西：让她在屏上说一句，别只写日志
+      const note = typeof o.note === 'string' ? o.note.trim().slice(0, 60) : '';
+      if (note !== '') pushHint('status', note, 'event', 2_000);
       return { kind: 'json', status: 200, obj: { ok: true, phase: earPhaseNow() } };
     }
 
@@ -5818,8 +6115,9 @@ export function apply(ctx: any): void {
         return { kind: 'json', status: 400, obj: { error: 'invalid JSON body' } };
       }
       const o = parsed && typeof parsed === 'object' ? (parsed as Record<string, unknown>) : {};
-      if (earPhaseNow() === 'listen') {
-        return { kind: 'json', status: 200, obj: { ok: false, reason: 'ear-busy' } };
+      // 【11-18】在听 / 嘴忙都不许从外面插进来（文档 9.10：嘴忙就丢）
+      if (earPhaseNow() === 'listen' || speakBusy()) {
+        return { kind: 'json', status: 200, obj: { ok: false, reason: 'ear-busy', skipped: true } };
       }
       // 判定 + 门禁 + 写叶子全在 core（唯一实现）；这里只负责把请求翻成 SayInput、回状态码。
       return {
@@ -5890,7 +6188,8 @@ export function apply(ctx: any): void {
         if (noSurface) return noSurface;
         const blocked = lockBlocked(d.petId, url.searchParams);
         if (blocked) return blocked;
-        state.writePet(d.petId, 'say', { clear: true });
+        // 收气泡也走唯一入口（契约测试要求写 say 叶子只许三个函数）
+        clearSayBubble(d.petId, 'chat');
         return { kind: 'json', status: 200, obj: { ok: true } };
       } catch (e) {
         return {
@@ -6374,8 +6673,37 @@ export function apply(ctx: any): void {
       obj: ok ? { ok: true, data: result.obj } : { ok: false, error: result.obj },
     };
   };
-  const v1Forward = async (target: string, method: string, body?: string): Promise<RouteResult> =>
-    v1Envelope(await handlePetRoute(`${ROUTE_PREFIX}/${target}`, method, body));
+  // 内部路由里有几条把 pet 放在**查询串**（/broadcast?pet=main），/v1 的调用方习惯写在 body 里。
+  // 这里统一搬一次，免得 /v1/show 被回「pet 必填」——11-19 全量测试逮到。
+  const V1_PET_QUERY = new Set(['broadcast', 'say', 'look', 'anim', 'throw', 'lock', 'position', 'lyric']);
+  const V1_SURFACE_QUERY = new Set(['broadcast', 'lyric']);
+  const surfaceOfBody = (body?: string): string | undefined => {
+    if (body === undefined || body === '') return undefined;
+    try {
+      const parsed = JSON.parse(body) as { surface?: unknown };
+      return typeof parsed.surface === 'string' && parsed.surface.trim() !== '' ? parsed.surface.trim() : undefined;
+    } catch {
+      return undefined;
+    }
+  };
+  const petOfBody = (body?: string): string => {
+    if (body === undefined || body === '') return '';
+    try {
+      const parsed = JSON.parse(body) as { pet?: unknown };
+      return typeof parsed.pet === 'string' ? parsed.pet.trim() : '';
+    } catch {
+      return '';
+    }
+  };
+  const v1Forward = async (target: string, method: string, body?: string): Promise<RouteResult> => {
+    const pet = V1_PET_QUERY.has(target) ? petOfBody(body) : '';
+    // /broadcast、/lyric 还要 surface（web / desktop / both / any）；对外门面默认 any（两头都写）
+    const query: string[] = [];
+    if (pet !== '') query.push(`pet=${encodeURIComponent(pet)}`);
+    if (V1_SURFACE_QUERY.has(target)) query.push(`surface=${encodeURIComponent(surfaceOfBody(body) ?? 'any')}`);
+    const suffix = query.length === 0 ? '' : `?${query.join('&')}`;
+    return v1Envelope(await handlePetRoute(`${ROUTE_PREFIX}/${target}${suffix}`, method, body));
+  };
   const V1_DO_ROUTES: Readonly<Record<string, string>> = {
     anim: 'anim',
     throw: 'throw',

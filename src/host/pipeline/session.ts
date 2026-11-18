@@ -87,9 +87,12 @@ export interface SessionStoreOptions {
   /** 目录：`数据/memory` */
   dir: string;
   now?: () => number;
-  maxChars?: number;
+  /** 换卷字数：给数字，或给个取值函数（配置文件改了不用重启） */
+  maxChars?: number | (() => number);
   /** 写摘要；失败返回空串，走本地兜底 */
   summarize: (prompt: string) => Promise<string>;
+  /** 换完卷顺手记 1~2 张长期卡（`by:'pet'`）；失败静默，不阻塞换卷 */
+  remember?: (turns: readonly SessionTurn[]) => Promise<void>;
   log?: (line: string) => void;
 }
 
@@ -100,6 +103,20 @@ export interface SessionStore {
   rollIfNeeded(): Promise<{ rolled: boolean; session: SessionFile; archive?: string }>;
   /** 给提示词用：摘要 + 最近 N 条 */
   context(limit?: number): Promise<{ summary: string; turns: SessionTurn[] }>;
+}
+
+/**
+ * 本地摘要：不叫模型，立刻能拿来换卷。
+ * 只抄最近三条「她说的 / 想说没说」的开头，宁可粗糙也不卡住换卷。
+ */
+export function localSummary(session: SessionFile): string {
+  const said = session.turns.filter((turn) => turn.kind !== 'heard').slice(-3);
+  if (said.length === 0) return '（这一卷没什么内容）';
+  const tail = said
+    .map((turn) => turn.text.replace(/\s+/gu, ' ').trim().slice(0, 60))
+    .filter((line) => line !== '')
+    .join('；');
+  return `（本地摘要）最近说过：${tail === '' ? '（没有）' : tail}`.slice(0, SUMMARY_MAX);
 }
 
 function fallbackSummary(session: SessionFile): string {
@@ -117,7 +134,11 @@ function fallbackSummary(session: SessionFile): string {
 
 export function createSessionStore(options: SessionStoreOptions): SessionStore {
   const now = options.now ?? (() => Date.now());
-  const maxChars = options.maxChars ?? ROLL_CHARS;
+  // 11-18：可以传函数，改配置当场生效（设置页「会话字数」那栏）
+  const maxCharsOf = (): number => {
+    const raw = typeof options.maxChars === 'function' ? options.maxChars() : (options.maxChars ?? ROLL_CHARS);
+    return Number.isFinite(raw) && raw > 0 ? raw : ROLL_CHARS;
+  };
   const log = options.log ?? ((): void => {});
   const file = join(options.dir, 'session.json');
   const archiveDir = join(options.dir, 'sessions');
@@ -163,33 +184,56 @@ export function createSessionStore(options: SessionStoreOptions): SessionStore {
 
     async rollIfNeeded() {
       const session = await load();
-      if (!shouldRoll(session, maxChars)) return { rolled: false, session };
+      if (!shouldRoll(session, maxCharsOf())) return { rolled: false, session };
       const stamp = new Date(session.startedAt).toISOString().replace(/[:.]/gu, '-').slice(0, 16);
       const archive = join(archiveDir, `${stamp}.md`);
       await mkdir(archiveDir, { recursive: true });
       await writeFile(archive, renderSession(session), 'utf8');
-      let summary = '';
-      try {
-        summary = (await options.summarize(summaryPrompt(session))).trim().slice(0, SUMMARY_MAX);
-      } catch {
-        summary = '';
-      }
-      if (summary === '') summary = fallbackSummary(session);
+      // 【11-18 换卷不等模型】先用本地摘要当场换卷——断网 / 模型慢都不影响接着聊；
+      // 模型摘要放到后台补，补上就覆盖新卷的 summaryFrom（卷没变才写，换了就丢）。
+      const local = localSummary(session);
       const fresh: SessionFile = {
-        ...emptySession(now(), summary),
+        ...emptySession(now(), local),
         // 新卷留最近 10 条，免得一句话都接不上
         turns: session.turns.slice(-KEEP_RECENT),
       };
       await save(fresh);
-      log(`roll archive=${archive} chars=${sessionChars(session)} summary=${summary.length}`);
+      log(`roll local archive=${archive} chars=${sessionChars(session)} summary=${local.length}`);
+      const previous = session;
+      void (async () => {
+        let summary = '';
+        try {
+          summary = (await options.summarize(summaryPrompt(previous))).trim().slice(0, SUMMARY_MAX);
+        } catch {
+          summary = '';
+        }
+        if (summary === '') {
+          log('roll summary fail（保留本地摘要）');
+          return;
+        }
+        const current = await load();
+        if (current.id !== fresh.id) {
+          log('roll summary stale（已经换过卷，丢弃）');
+          return;
+        }
+        await save({ ...current, summaryFrom: summary });
+        log(`roll summary ok=${summary.length}`);
+      })();
+      // 【11-18 第 11 条】换完卷顺手叫她自己记 1~2 张卡（`by:'pet'`），失败静默
+      if (options.remember !== undefined) {
+        void options.remember(previous.turns).catch((error) => {
+          log(`roll cards fail ${error instanceof Error ? error.message : String(error)}`);
+        });
+      }
       return { rolled: true, session: fresh, archive };
     },
 
-    async context(limit = KEEP_RECENT) {
+    async context(limit?: number) {
       const session = await load();
       return {
         summary: session.summaryFrom ?? '',
-        turns: session.turns.slice(-limit),
+        // 不传 limit = 整卷（主想要「当前卷全文」，文档 9.4）；传了才截最近 N 条
+        turns: limit === undefined ? [...session.turns] : session.turns.slice(-limit),
       };
     },
   };

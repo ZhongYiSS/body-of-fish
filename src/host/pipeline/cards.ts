@@ -16,7 +16,14 @@ export interface Card {
   lastUsedAt?: number;
 }
 
-export const CARD_MAX = 400;
+/**
+ * 卡库上限：**先看字数，再看条数**（11-18 哥哥定的口径「条数放宽，限制字数即可」）。
+ *
+ * 为什么以字数为主：每张卡最多 60 字，条数说不清库有多大；真正吃内存、拖慢每轮
+ * `pickCards` 遍历的是总量。条数上限留着，只是防有人往里灌 2 个字的碎卡。
+ */
+export const CARD_MAX = 2_000;
+export const CARD_TOTAL_CHARS = 20_000;
 export const CARD_INJECT = 5;
 export const CARD_TEXT_MAX = 60;
 export const CARD_WEIGHT_MAX = 5;
@@ -106,17 +113,41 @@ export function decayCards(cards: readonly Card[], now: number): Card[] {
   });
 }
 
-/** 超上限时挑出要归档的（最不重要的），保持原顺序返回 [留下, 归档]。 */
+/** 卡库总字数（`text` 之和）。 */
+export function cardsChars(cards: readonly Card[]): number {
+  let total = 0;
+  for (const card of cards) total += card.text.length;
+  return total;
+}
+
+/**
+ * 超上限时挑出要归档的（最不重要的），保持原顺序返回 [留下, 归档]。
+ *
+ * 两个上限**任一**超了就裁：条数 `max`（默认 2000）与总字数 `maxChars`（默认 20,000）。
+ * 裁法永远是「最不重要的先走」：权重低 → 久没用过 → 建得早。
+ */
 export function splitOverflow(
   cards: readonly Card[],
   max = CARD_MAX,
+  maxChars = CARD_TOTAL_CHARS,
 ): { keep: Card[]; archive: Card[] } {
-  if (cards.length <= max) return { keep: [...cards], archive: [] };
+  if (cards.length <= max && cardsChars(cards) <= maxChars) {
+    return { keep: [...cards], archive: [] };
+  }
   const ranked = [...cards].sort((a, b) => {
     if (a.weight !== b.weight) return a.weight - b.weight;
     return (a.lastUsedAt ?? a.at) - (b.lastUsedAt ?? b.at);
   });
-  const dropIds = new Set(ranked.slice(0, cards.length - max).map((card) => card.id));
+  // 从最不重要的开始丢，丢到两个上限都满足为止
+  const dropIds = new Set<string>();
+  let count = cards.length;
+  let chars = cardsChars(cards);
+  for (const card of ranked) {
+    if (count <= max && chars <= maxChars) break;
+    dropIds.add(card.id);
+    count -= 1;
+    chars -= card.text.length;
+  }
   const keep: Card[] = [];
   const archive: Card[] = [];
   for (const card of cards) (dropIds.has(card.id) ? archive : keep).push(card);

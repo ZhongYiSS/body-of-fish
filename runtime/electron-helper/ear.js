@@ -91,7 +91,7 @@ function appendEvent(event, extra) {
  * 出字之后换【在想】，回答或出错就撤。宿主据此让别的声音和气泡让路。
  * 令牌只从环境变量来（与 triggerMenu / peek 同一套），不落盘。
  */
-async function postEarPhase(phase) {
+async function postEarPhase(phase, note = '') {
   try {
     const res = await fetch(petBase() + '/ear', {
       method: 'POST',
@@ -99,7 +99,7 @@ async function postEarPhase(phase) {
         'content-type': 'application/json',
         ...(process.env.DSH_PET_API_TOKEN ? { 'x-dsh-pet-token': process.env.DSH_PET_API_TOKEN } : {}),
       },
-      body: JSON.stringify({ phase }),
+      body: JSON.stringify(note === '' ? { phase } : { phase, note }),
     });
     appendEvent('ear-' + phase, String(res.status));
   } catch (e) {
@@ -113,9 +113,10 @@ async function postEarPhase(phase) {
  */
 let earPhaseNow = 'idle';
 let earHeartbeat = null;
-function reportEarPhase(phase) {
+function reportEarPhase(phase, note = '') {
   earPhaseNow = phase;
-  void postEarPhase(phase);
+  // note 只跟着「这一次」发出去（心跳续命不带，免得每 8 秒重复冒一句提示）
+  void postEarPhase(phase, note);
   if (earHeartbeat !== null) {
     clearInterval(earHeartbeat);
     earHeartbeat = null;
@@ -173,8 +174,10 @@ function handleLine(line) {
     return;
   }
   if (event.event === 'error') {
-    log('出错：' + (event.message || ''));
-    reportEarPhase('idle');
+    const why = String(event.message || '').trim();
+    log('出错：' + why);
+    // 【11-18】听不清要让她自己说一声（自从删掉听.py 的自冒泡，这条就只剩日志了）
+    reportEarPhase('idle', why.slice(0, 40));
   }
 }
 

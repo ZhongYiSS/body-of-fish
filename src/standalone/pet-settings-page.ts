@@ -123,6 +123,9 @@ export const petSettingsPage = `<!doctype html>
 </fieldset>
 </div>
 <div class="gpane" data-gpane="more">
+<div class="pair"><label for="contextRollChars">换卷字数（800–20000，越小记得越细）</label><input id="contextRollChars" type="number" min="800" max="20000" step="100"></div>
+<div class="pair"><label for="contextCardInject">每次注入几张卡片（1–20）</label><input id="contextCardInject" type="number" min="1" max="20" step="1"></div>
+<div class="pair"><label for="mouthQueueMax">嘴边最多排几条（1–10）</label><input id="mouthQueueMax" type="number" min="1" max="10" step="1"></div>
 <fieldset><legend>全局快捷键</legend>
 <div class="pair"><label for="earHotkey">按住说话</label><input id="earHotkey" type="text" maxlength="32" placeholder="留空 = Alt+T"></div>
 <div class="pair"><label for="peekHotkey">看一眼屏幕</label><input id="peekHotkey" type="text" maxlength="32" placeholder="留空 = Alt+G"></div>
@@ -368,6 +371,7 @@ export const petSettingsScript = `
     for (const id of ['name', 'fontFamily', 'corner', 'persona', 'visionMode', 'visionEndpoint', 'visionModel',
       'visionBaseUrl', 'voiceHeaders', 'ttsHeaders', 'voiceMode', 'voiceProtocol', 'voiceEndpoint', 'voiceModel', 'voiceBaseUrl',
       'voiceRefAudio', 'voicePromptText', 'voiceVolume', 'voiceStaleSec', 'voiceGapMs',
+      'contextRollChars', 'contextCardInject', 'mouthQueueMax',
       'earHotkey', 'peekHotkey', 'sayHotkey']) {
       const el = get(id); if (el && data[id] !== undefined) el.value = String(data[id]);
     }
@@ -411,8 +415,6 @@ export const petSettingsScript = `
       }
       hwndSel.value = want;
     }
-    const mergeBox = get('mergeLook');
-    if (mergeBox) mergeBox.checked = data.mergeLook !== false;
     const sess = get('subtitleSessData');
     if (sess) sess.value = typeof data.subtitleSessData === 'string' ? data.subtitleSessData : '';
     if (data.watchPromptDefault || data.watchDetailPromptDefault) {
@@ -478,6 +480,9 @@ export const petSettingsScript = `
       voiceModel: get('voiceModel').value.trim(), voiceRefAudio: get('voiceRefAudio').value.trim(),
       voicePromptText: get('voicePromptText').value.trim(),
       voiceVolume: Number(get('voiceVolume').value),
+      contextRollChars: Number(get('contextRollChars').value),
+      contextCardInject: Number(get('contextCardInject').value),
+      mouthQueueMax: Number(get('mouthQueueMax').value),
       voiceStaleSec: Number(get('voiceStaleSec').value),
       voiceGapMs: Number(get('voiceGapMs').value),
       voiceBaseUrl: get('voiceBaseUrl').value.trim(), clearVoiceApiKey: get('clearVoiceApiKey').checked,
@@ -487,7 +492,6 @@ export const petSettingsScript = `
       watchPrompt: get('watchPrompt') ? get('watchPrompt').value : undefined,
       watchMode: get('watchMode') ? get('watchMode').value : undefined,
       watchWindowHwnd: get('watchWindowHwnd') ? Number(get('watchWindowHwnd').value) : undefined,
-      mergeLook: get('mergeLook') ? get('mergeLook').checked : undefined,
       watchDetailPrompt: get('watchDetailPrompt') ? get('watchDetailPrompt').value : undefined,
       subtitleSessData: get('subtitleSessData') ? get('subtitleSessData').value.trim() : undefined,
     };

@@ -24,6 +24,8 @@ import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
+import { ddaInput, ddaVf } from './capture-source';
+
 /** 缩略图宽度：64 格。旧版一直用这个尺寸，指纹就是 64×36 的灰度字节。 */
 export const THUMB_WIDTH = 64;
 /** 缩略图高度：36 格。 */
@@ -152,16 +154,11 @@ export function defaultCapture(): Promise<Uint8Array> {
     '-hide_banner',
     '-loglevel',
     'error',
-    '-f',
-    'gdigrab',
-    '-framerate',
-    '1',
-    '-i',
-    'desktop',
+    ...ddaInput(),
     '-frames:v',
     '1',
     '-vf',
-    'scale=64:36,format=gray',
+    ddaVf('scale=64:36,format=gray'),
     '-f',
     'rawvideo',
     '-pix_fmt',

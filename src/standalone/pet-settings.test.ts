@@ -447,3 +447,66 @@ test('嗓子：普通保存不能抹掉本地地址与发声协议（11-16 声�
   const fillTts = (fill.model as Record<string, unknown>).tts as Record<string, unknown>;
   assert.equal(fillTts.endpoint, 'http://127.0.0.1:9880');
 });
+
+test('换卷字数 / 卡片注入 / 嘴边队列：回显、保存、越界夹取（11-18 文档 9.13）', () => {
+  const view = viewOf({ context: { rollChars: 8000, cardInject: 8 }, mouth: { queueMax: 6 } });
+  assert.equal(view.contextRollChars, 8000);
+  assert.equal(view.contextCardInject, 8);
+  assert.equal(view.mouthQueueMax, 6);
+
+  // 没配过就是默认 5000 / 5 / 3
+  const empty = viewOf({});
+  assert.equal(empty.contextRollChars, 5000);
+  assert.equal(empty.contextCardInject, 5);
+  assert.equal(empty.mouthQueueMax, 3);
+
+  // 越界由 schema 直接拒（页面滑杆之外手改 jsonc 也不会写进坏值）
+  assert.throws(() => validatePetSettings({ contextRollChars: 100 }), /出错的字段：contextRollChars/u);
+  assert.throws(() => validatePetSettings({ mouthQueueMax: 99 }), /出错的字段：mouthQueueMax/u);
+
+  // 写进去只动这两段，别的段原样
+  const next = applyPatch({ model: { chat: { enabled: true, kind: 'local', endpoint: 'http://x' } } }, {
+    contextRollChars: 12000,
+    contextCardInject: 3,
+    mouthQueueMax: 8,
+  });
+  assert.deepEqual((next as Record<string, Record<string, unknown>>).context, { rollChars: 12000, cardInject: 3 });
+  assert.deepEqual((next as Record<string, Record<string, unknown>>).mouth, { queueMax: 8 });
+  assert.deepEqual((next as Record<string, Record<string, unknown>>).model, {
+    chat: { enabled: true, kind: 'local', endpoint: 'http://x' },
+  });
+});
+
+test('设置页里有这三个控件，且都在「其他」页签', () => {
+  for (const id of ['contextRollChars', 'contextCardInject', 'mouthQueueMax']) {
+    assert.ok(petSettingsPage.includes(`id="${id}"`), `页面缺控件 ${id}`);
+    assert.ok(petSettingsScript.includes(`'${id}'`), `回填名单缺 ${id}`);
+    assert.ok(petSettingsScript.includes(`${id}: Number(get('${id}').value)`), `提交体缺 ${id}`);
+  }
+  const more = petSettingsPage.indexOf('data-gpane="more"');
+  assert.ok(more >= 0);
+  assert.ok(petSettingsPage.indexOf('id="contextRollChars"') > more, '这三个控件要落在「其他」页签里');
+});
+
+// 【汐儿 · 11-19 全量测试】以前非法地址返回 200 却静默不保存，用户以为存上了；现在直接报错点名。
+test('地址字段写错要报错点名，别静默丢', () => {
+  for (const key of ['visionEndpoint', 'voiceEndpoint', 'visionBaseUrl', 'voiceBaseUrl']) {
+    assert.throws(
+      () => validatePetSettings({ [key]: 'QA 测试值' }),
+      new RegExp(`出错的字段：${key}`, 'u'),
+      `${key} 应该被拒`,
+    );
+    assert.throws(() => validatePetSettings({ [key]: 'api.deepseek.com' }), /出错的字段/u, `${key} 缺协议头也要拒`);
+    // 空串是「不填 / 沿用」，必须放行
+    assert.doesNotThrow(() => validatePetSettings({ [key]: '' }));
+    // 正常地址必须放行（含端口和路径）
+    assert.doesNotThrow(() => validatePetSettings({ [key]: 'http://127.0.0.1:9880/tts' }));
+    assert.doesNotThrow(() => validatePetSettings({ [key]: 'https://api.deepseek.com/v1' }));
+  }
+});
+
+// 【汐儿 · 11-19】mergeLook 是假功能留下的死键（陪伴本来就是一次调用），schema 已删。
+test('mergeLook 死键已删掉（再传就是未知字段）', () => {
+  assert.throws(() => validatePetSettings({ mergeLook: true }), /出错的字段：mergeLook/u);
+  assert.ok(!petSettingsPage.includes("get('mergeLook')"), '页面不该再读 mergeLook');
+});

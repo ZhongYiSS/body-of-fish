@@ -55,7 +55,10 @@ export type Backend =
       /** 这个能力自己的请求头（哥哥 11-17：声音/视觉各一个「会话头」），比全局的优先 */
       extraHeaders?: Record<string, string>;
     })
-  | ({ kind: 'local'; endpoint: string; model?: string } & SpeakProtocolOptions);
+  | ({ kind: 'local'; endpoint: string; model?: string } & SpeakProtocolOptions & {
+      /** 本地后端不联网，但设置页允许先填好会话头，切回云端时直接生效（11-19） */
+      extraHeaders?: Record<string, string>;
+    });
 
 /** 某个能力的配置：开关 + 后端。 */
 export interface CapabilityConfig {

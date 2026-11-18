@@ -17,6 +17,13 @@ export interface MemoryTurn {
   at: number;
   /** watch = 看护模式的观察笔记（本鱼 · 11-09 加：只记「变了什么」，不参与对话上下文） */
   source: 'chat' | 'companion' | 'watch';
+  /**
+   * 这一条是「说出来的」「听进去的」还是「想说没说的」（文档 9.6）。
+   * 老日记文件没有这个字段——读的时候按 source 推：user → heard，其余 → said。
+   */
+  kind?: 'said' | 'heard' | 'thought';
+  /** 说话 / 听见时她那一侧的事件等级（5 听一句 / 4 手动 / 3 对话 / 2 陪伴与一眼看 / 1 碎碎念） */
+  level?: number;
 }
 
 /** 会话接入点：非空表示现在跟着某个 DSH 会话走，短期记忆退化为展示。 */

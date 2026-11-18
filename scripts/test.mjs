@@ -44,6 +44,7 @@ const args = [
   // 注意：--import 收绝对 Windows 路径会报 ERR_UNSUPPORTED_ESM_URL_SCHEME，必须给 file:// URL
   pathToFileURL(resolve(ROOT, 'scripts/test-register.mjs')).href,
   '--test',
+  '--test-force-exit',
   ...files,
 ];
 

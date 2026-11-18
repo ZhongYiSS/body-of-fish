@@ -56,12 +56,14 @@ describe('换卷式上下文（纯逻辑）', () => {
 });
 
 describe('换卷式上下文（落盘）', () => {
-  it('够了就换卷：旧卷归档、新卷带摘要与最近 10 条，旧卷不删', async () => {
+  it('够了就换卷：旧卷归档，新卷先带本地摘要，模型摘要后台补上', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'pet-session-'));
+    const logs: string[] = [];
     const store = createSessionStore({
       dir,
       now: () => 1_700_000_000_000,
       maxChars: 100,
+      log: (line) => logs.push(line),
       summarize: async () => '他让我把声音修好；我答应了还没做。\n他最后一句：修好声音',
     });
     await store.append({ kind: 'said', text: 'a'.repeat(60) });
@@ -71,9 +73,16 @@ describe('换卷式上下文（落盘）', () => {
     assert.ok(result.archive !== undefined && existsSync(result.archive));
     const archived = readFileSync(result.archive!, 'utf8');
     assert.match(archived, /aaaa/u);
+    // 当场拿到的是本地摘要（不等模型）
+    assert.match(result.session.summaryFrom ?? '', /本地摘要/u);
+    // 后台补完，落到同一个卷
+    await new Promise((resolve) => setImmediate(resolve));
+    await new Promise((resolve) => setTimeout(resolve, 30));
     const fresh = JSON.parse(readFileSync(join(dir, 'session.json'), 'utf8'));
     assert.match(fresh.summaryFrom, /修好声音/u);
     assert.ok(fresh.turns.length <= KEEP_RECENT);
+    assert.ok(logs.some((line) => line.startsWith('roll local')));
+    assert.ok(logs.some((line) => line.startsWith('roll summary ok')));
   });
 
   it('没到字就不换，摘要为空也不炸', async () => {
@@ -87,12 +96,14 @@ describe('换卷式上下文（落盘）', () => {
     assert.equal(context.turns.length, 1);
   });
 
-  it('摘要抛错走本地兜底，不把卷丢掉', async () => {
+  it('模型摘要抛错：卷照样换、本地摘要留着，后台记一行 fail', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'pet-session3-'));
+    const logs: string[] = [];
     const store = createSessionStore({
       dir,
       now: () => 1_700_000_000_000,
       maxChars: 10,
+      log: (line) => logs.push(line),
       summarize: async () => {
         throw new Error('模型挂了');
       },
@@ -100,6 +111,20 @@ describe('换卷式上下文（落盘）', () => {
     await store.append({ kind: 'said', text: 'x'.repeat(20) });
     const result = await store.rollIfNeeded();
     assert.equal(result.rolled, true);
-    assert.match(result.session.summaryFrom ?? '', /自动摘要失败/u);
+    assert.match(result.session.summaryFrom ?? '', /本地摘要/u);
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    assert.ok(logs.some((line) => line.startsWith('roll summary fail')));
+  });
+
+  it('不传 limit 就是整卷（主想要卷全文）', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'pet-session4-'));
+    const store = createSessionStore({ dir, now: () => 1, maxChars: ROLL_CHARS, summarize: async () => '' });
+    for (let i = 0; i < KEEP_RECENT + 5; i += 1) {
+      await store.append({ kind: 'said', text: `第${i}句` });
+    }
+    const whole = await store.context();
+    assert.equal(whole.turns.length, KEEP_RECENT + 5);
+    const tail = await store.context(KEEP_RECENT);
+    assert.equal(tail.turns.length, KEEP_RECENT);
   });
 });

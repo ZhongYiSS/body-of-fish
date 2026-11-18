@@ -65,7 +65,8 @@ describe('在听 / 在想：三个状态都要落到提示层', () => {
   });
 
   test('壳把 rec-start / text / reply / error 翻成 listen / think / idle', () => {
-    assert.match(earCode, /async function postEarPhase\(phase\)/);
+    // 11-18：签名多了 note（听不清时把原因带到宿主，由宿主 pushHint 说出来）
+    assert.match(earCode, /async function postEarPhase\(phase, note = ''\)/);
     assert.match(earCode, /await fetch\(petBase\(\) \+ '\/ear'/);
     assert.equal(earCode.split("reportEarPhase('listen');").length - 1, 1, '录音开始要报一次 listen');
     // 11-16 晚 m24332：按停麦就报 think（rec-stop）。
@@ -75,8 +76,9 @@ describe('在听 / 在想：三个状态都要落到提示层', () => {
     // 不撤的话心跳会一直替它喊「在听」，宿主 45 秒兜底永远等不到，就成永久闭嘴。
     // 【11-17 m24756】reply 不再撤：reply 只是文字到了，声音还要合成两秒，早撤就是「说话前闪一下」。
     // 收尾交给宿主——第一句音频真的开播时它自己 setEarPhase('idle')。
+    // 11-18：error 那条会带上原因（`reportEarPhase('idle', why…)`），所以数前缀而不是整句
     assert.equal(
-      earCode.split("reportEarPhase('idle');").length - 1,
+      earCode.split("reportEarPhase('idle'").length - 1,
       3,
       'error、进程退出、进程报错各撤一次（reply 不撤）',
     );
@@ -169,7 +171,8 @@ describe('在听 / 在想：别的声音和气泡让路', () => {
     // 挡了就是有字无声。earQuiet 已删除，第三方气泡改走 /broadcast 的 listen 判断。
     // 11-16 晚 m24332：她自己的「让我想想…」占位要能写出去（那时正是 think），所以留了 force 例外。
     assert.match(hostCode, /if \(earPhaseNow\(\) === 'listen'\) return;/, 'writeSayBubble 只在录音时让位');
-    assert.match(hostCode, /\{ ok: false, reason: 'ear-busy' \}/);
+    // 11-18：/broadcast 的闸扩成「在听 或 嘴忙」（文档 9.10），回包里多一个 skipped
+    assert.match(hostCode, /\{ ok: false, reason: 'ear-busy', skipped: true \}/);
     assert.ok(!hostCode.includes('earQuiet'), 'earQuiet 应该已经删干净');
   });
 

@@ -59,6 +59,16 @@ const voicePresetSchema = z
 const HOTKEY_PATTERN = /^(?:[A-Za-z0-9]+\+)*[A-Za-z0-9]+$/;
 
 /** 数字用整数：像素、px 字号、百分比样子的物理参数都不需要小数，省得 UI 与文件互相抖动 */
+/** 地址字段：空串（= 不填/沿用）或 http(s):// 开头；写错当场报错点名，不静默丢（11-19 全量测试发现过） */
+const urlField = (max: number) =>
+  z
+    .string()
+    .trim()
+    .max(max)
+    .refine((value) => value === '' || /^https?:\/\/[^\s/]+/u.test(value), {
+      message: '地址要写 http(s):// 开头，或者留空',
+    });
+
 const patchSchema = z
   .object({
     name: z.string().trim().min(1).max(24).optional(),
@@ -107,10 +117,10 @@ const patchSchema = z
     // （host/core/model-config.ts 的 parseModelConfig 读同一份）。
     // 云端 = 复用 AI 设置里的地址与密钥（host 侧运行期补全），这里只填模型名。
     visionMode: z.enum(BACKENDS).optional(),
-    visionEndpoint: z.string().trim().max(512).optional(),
+    visionEndpoint: urlField(512).optional(),
     visionModel: z.string().trim().max(200).optional(),
     voiceMode: z.enum(BACKENDS).optional(),
-    voiceEndpoint: z.string().trim().max(512).optional(),
+    voiceEndpoint: urlField(512).optional(),
     voiceModel: z.string().trim().max(200).optional(),
     // 发声协议：openai = 标准 /audio/speech；sovits = GPT-SoVITS 的 GET /tts。
     // 参考音是 GSV 的命门（音色全靠这几秒），prompt_text 必须与参考音逐字一致。
@@ -120,8 +130,6 @@ const patchSchema = z
     // 【汐儿 · 11-16 m21257】取景三档 + 手动模式选的窗口
     watchMode: z.enum(['full', 'auto', 'window']).optional(),
     watchWindowHwnd: z.number().int().min(0).max(99_999_999).optional(),
-    // 【汐儿 · 11-16 m21452】识图与说话合成一次（默认开）
-    mergeLook: z.boolean().optional(),
     // 【汐儿 · 11-15】播放音量 0~100（只影响播放，不改合成）
     voicePick: z.enum(VOICE_PICKS).optional(),
     voicePresets: z
@@ -134,6 +142,10 @@ const patchSchema = z
       .strict()
       .optional(),
     voiceVolume: z.number().int().min(0).max(100).optional(),
+  // 11-18（文档 9.13）：换卷字数 / 卡片注入条数 / 嘴边队列长度
+  contextRollChars: z.number().int().min(800).max(20000).optional(),
+  contextCardInject: z.number().int().min(1).max(20).optional(),
+  mouthQueueMax: z.number().int().min(1).max(10).optional(),
     // 【汐儿 · 11-16 m21833】提示气泡：位置偏移 + 字号
     // 【汐儿 · 11-16 m22720】不要 .int()：拖气泡预览算出来的是小数（如 12.4），
     // 一个 0.4 像素的小数会把整份设置判成无效。取整由 applyPatch 做。
@@ -148,10 +160,10 @@ const patchSchema = z
     // 【11-01 哥哥第 3 条】识图/声音选「云端」时，接口地址与密钥**可以单独填**，
     // 不再只能沿用对话模型那份。语义：留空 = 沿用已有值；再空 = 宿主运行期从 AI 设置补
     // （fillCloudBackend 只补空位，所以这里填了就优先）。密钥不回显，只回 has 标记。
-    visionBaseUrl: z.string().trim().max(2048).optional(),
+    visionBaseUrl: urlField(2048).optional(),
     visionApiKey: z.string().trim().max(8192).optional(),
     clearVisionApiKey: z.boolean().optional(),
-    voiceBaseUrl: z.string().trim().max(2048).optional(),
+    voiceBaseUrl: urlField(2048).optional(),
     voiceApiKey: z.string().trim().max(8192).optional(),
     clearVoiceApiKey: z.boolean().optional(),
     // 【汐儿 · 11-10 m18312】游戏陪伴：提示词全文可改 + 突变评分/尺寸/开口闸可调。
@@ -373,6 +385,9 @@ export function viewOf(config: unknown): Record<string, unknown> {
     })(),
     voiceRefAudio: speakOf(modelSection.tts).refAudioPath ?? '',
     voiceVolume: asInt(asDict(root.voice)?.volume, 100, 0, 100),
+    contextRollChars: asInt(asDict(root.context)?.rollChars, 5000, 800, 20000),
+    contextCardInject: asInt(asDict(root.context)?.cardInject, 5, 1, 20),
+    mouthQueueMax: asInt(asDict(root.mouth)?.queueMax, 3, 1, 10),
     // 【11-17】嗓子四块：当前用哪块 + 四块各自的字段（切页签时页面不用再问服务器）
     voicePick: pickOf(root, modelSection.tts),
     voicePresets: (() => {
@@ -409,7 +424,6 @@ export function viewOf(config: unknown): Record<string, unknown> {
     })(),
     watchWindowHwnd: asInt(watchSectionRaw.windowHwnd, 0, 0, 99_999_999),
     // 识图与说话合成一次（默认开，11-16 m21452）：放在 model 段顶层，不属于任何一项能力
-    mergeLook: asDict(root.model)?.mergeLook !== false,
     // B站 SESSDATA：回显（本地配置，不往外发），没填就是空串
     subtitleSessData: (() => {
       const section = asDict(root.subtitle);
@@ -449,6 +463,11 @@ export function viewOf(config: unknown): Record<string, unknown> {
 /** 只改白名单字段，其余原样保留（含 pets 里其他条目、注释型键、未识别的第三方键） */
 export function applyPatch(config: Dict, patch: PetSettingsPatch): Dict {
   const next: Dict = { ...config };
+  // 改补丁之前的「当前嗓子块」：后面要把 live 存回它自己那一块（11-19：原来用重建后的值反推，
+  // 页面上一改字段就被存进了隔壁块）
+  const pickBefore = pickOf(next, asDict(next.model)?.tts);
+  // 改补丁之前那份真值：纯换块时要把它存回旧块（重建后的 model.tts 已经是新块的值了）
+  const liveBefore = voicePresetOf(asDict(next.model)?.tts);
   // 看图 / 声音各自的请求头（哥哥 11-17 m26607）：只对那个能力生效，写进 model.<能力>.extraHeaders
   const headerPatch = (raw: string | undefined): Record<string, string> | undefined => {
     if (raw === undefined) return undefined;
@@ -465,17 +484,10 @@ export function applyPatch(config: Dict, patch: PetSettingsPatch): Dict {
   };
   const visionHeaders = headerPatch(patch.visionHeaders);
   const ttsHeaders = headerPatch(patch.ttsHeaders);
-  if (visionHeaders !== undefined || ttsHeaders !== undefined) {
-    const model = asDict(next.model) ?? {};
-    const put = (name: 'vision' | 'tts', headers: Record<string, string> | undefined): void => {
-      if (headers === undefined) return;
-      const cap = asDict(model[name]) ?? {};
-      model[name] = { ...cap, extraHeaders: headers };
-    };
-    put('vision', visionHeaders);
-    put('tts', ttsHeaders);
-    next.model = model;
-  }
+  // 11-19 全量测试：请求头存在 model.<cap>.backend.extraHeaders（parseModelConfig 与页面回显都读这里），
+  // 原来写到了能力顶层 → 存进去就消失。这里只算值，真正并进 backend 在下面 touchesModel 里做。
+  const withHeaders = <T extends { backend: object }>(cap: T, headers: Record<string, string> | undefined): T =>
+    headers === undefined ? cap : { ...cap, backend: { ...cap.backend, extraHeaders: headers } };
   const pets = Array.isArray(config.pets) ? [...(config.pets as unknown[])] : [];
   const pet: Dict = { ...(asDict(pets[0]) ?? {}) };
   pet.id = typeof pet.id === 'string' && pet.id !== '' ? pet.id : 'main';
@@ -558,6 +570,9 @@ export function applyPatch(config: Dict, patch: PetSettingsPatch): Dict {
   // 看图 / 声音：只改 model 段里对应的一项，chat 与另一项原样搬过去（toConfigSection 会写全三项，
   // 所以必须先解析出完整配置再改 —— 直接手拼 model 段会把 chat 的 key 冲掉）。
   const touchesModel = [
+    // 11-19：只改会话头也要走这一段，否则整块被跳过
+    'visionHeaders',
+    'ttsHeaders',
     'visionMode',
     'visionEndpoint',
     'visionModel',
@@ -576,6 +591,16 @@ export function applyPatch(config: Dict, patch: PetSettingsPatch): Dict {
   ].some((key) => patch[key as keyof PetSettingsPatch] !== undefined);
   if (touchesModel) {
     const current = parseModelConfig(next.model);
+    // 能力自带请求头存在 backend.extraHeaders（remote 才有）；这里安全取出来再带进重建后的 backend
+    const keptHeaders = (backend: object): Record<string, string> | undefined => {
+      const raw = (backend as { extraHeaders?: unknown }).extraHeaders;
+      if (raw === null || typeof raw !== 'object') return undefined;
+      const out: Record<string, string> = {};
+      for (const [key, value] of Object.entries(raw as Record<string, unknown>)) {
+        if (typeof value === 'string') out[key] = value;
+      }
+      return Object.keys(out).length > 0 ? out : undefined;
+    };
     const build = (
       base: (typeof current)['vision'],
       mode: (typeof BACKENDS)[number] | undefined,
@@ -585,8 +610,12 @@ export function applyPatch(config: Dict, patch: PetSettingsPatch): Dict {
       apiKey: string | undefined,
       clearKey: boolean | undefined,
     ): (typeof current)['vision'] => {
+      const kept = keptHeaders(base.backend);
       const nextMode = mode ?? (base.enabled ? (base.backend.kind === 'local' ? 'local' : 'remote') : 'off');
-      if (nextMode === 'off') return { enabled: false, backend: { kind: 'local', endpoint: '' } };
+      if (nextMode === 'off') {
+        // 关掉这一项也要留住会话头：设置页允许先填、以后打开直接用（11-19）
+        return { enabled: false, backend: { kind: 'local', endpoint: '', ...(kept !== undefined ? { extraHeaders: kept } : {}) } };
+      }
       const backend = base.backend;
       if (nextMode === 'local') {
         // 空串 = 没填，不是"清掉"：本地后端没有地址就是哑的（11-16 声音丢失事故）
@@ -594,23 +623,46 @@ export function applyPatch(config: Dict, patch: PetSettingsPatch): Dict {
         const typed = endpoint !== undefined ? endpoint.trim() : undefined;
         const point = typed !== undefined && typed !== '' ? typed : fallbackPoint;
         const name = model !== undefined ? model : backend.kind === 'session' ? '' : (backend.model ?? '');
-        return { enabled: true, backend: { kind: 'local', endpoint: point, ...(name ? { model: name } : {}) } };
+        return {
+          enabled: true,
+          backend: {
+            kind: 'local',
+            endpoint: point,
+            ...(name ? { model: name } : {}),
+            ...(kept !== undefined ? { extraHeaders: kept } : {}),
+          },
+        };
       }
       // 云端：地址/密钥可以单独填（哥哥 11-01 要求）；没填就沿用配置里已有的值，
       // 再没有才由宿主运行期从 AI 设置补全（见 host/index.ts 的 fillCloudBackend）。
       // 显式传空串 = 清掉（清掉后同样回落到 AI 设置那份）。
       const previous = backend.kind === 'remote' ? backend : undefined;
-      const name = model !== undefined ? model : backend.kind === 'session' ? '' : (backend.model ?? '');
-      const nextBaseUrl = baseUrl !== undefined ? baseUrl : (previous?.baseUrl ?? '');
+      // 11-18（文档 9.13）：**空串=没改**，与密钥同口径——切来切去不该把已经填好的地址冲掉；
+      // 真要清空，走单独的「清掉密钥」那种显式动作，别靠提交空框。
+      const typedModel = model !== undefined ? model.trim() : undefined;
+      const name =
+        typedModel !== undefined && typedModel !== ''
+          ? typedModel
+          : backend.kind === 'session'
+            ? ''
+            : (backend.model ?? '');
+      const typedUrl = baseUrl !== undefined ? baseUrl.trim() : undefined;
+      const nextBaseUrl = typedUrl !== undefined && typedUrl !== '' ? typedUrl : (previous?.baseUrl ?? '');
       const nextApiKey =
         clearKey === true ? '' : apiKey !== undefined && apiKey !== '' ? apiKey : (previous?.apiKey ?? '');
       return {
         enabled: true,
-        backend: { kind: 'remote', baseUrl: nextBaseUrl, model: name, ...(nextApiKey ? { apiKey: nextApiKey } : {}) },
+        backend: {
+          kind: 'remote',
+          baseUrl: nextBaseUrl,
+          model: name,
+          ...(nextApiKey ? { apiKey: nextApiKey } : {}),
+          ...(kept !== undefined ? { extraHeaders: kept } : {}),
+        },
       };
     };
     const vision = build(
-      current.vision,
+      withHeaders(current.vision, visionHeaders),
       patch.visionMode,
       patch.visionEndpoint,
       patch.visionModel,
@@ -619,7 +671,7 @@ export function applyPatch(config: Dict, patch: PetSettingsPatch): Dict {
       patch.clearVisionApiKey,
     );
     let tts = build(
-      current.tts,
+      withHeaders(current.tts, ttsHeaders),
       patch.voiceMode,
       patch.voiceEndpoint,
       patch.voiceModel,
@@ -665,6 +717,23 @@ export function applyPatch(config: Dict, patch: PetSettingsPatch): Dict {
     if (patch.voiceGapMs !== undefined) merged.gapMs = Math.min(5000, Math.max(0, Math.round(patch.voiceGapMs)));
     next.voice = merged;
   }
+  // 换卷字数 / 卡片注入 / 嘴边队列（11-18，文档 9.13）
+  if (patch.contextRollChars !== undefined || patch.contextCardInject !== undefined) {
+    const merged = { ...(asDict(next.context) ?? {}) };
+    if (patch.contextRollChars !== undefined) {
+      merged.rollChars = Math.min(20000, Math.max(800, Math.round(patch.contextRollChars)));
+    }
+    if (patch.contextCardInject !== undefined) {
+      merged.cardInject = Math.min(20, Math.max(1, Math.round(patch.contextCardInject)));
+    }
+    next.context = merged;
+  }
+  if (patch.mouthQueueMax !== undefined) {
+    next.mouth = {
+      ...(asDict(next.mouth) ?? {}),
+      queueMax: Math.min(10, Math.max(1, Math.round(patch.mouthQueueMax))),
+    };
+  }
   // 提示气泡的位置与字号（单独一段 hint，m21833）
   if (patch.hintX !== undefined || patch.hintY !== undefined || patch.hintSize !== undefined) {
     const merged = { ...(asDict(next.hint) ?? {}) };
@@ -674,6 +743,8 @@ export function applyPatch(config: Dict, patch: PetSettingsPatch): Dict {
     next.hint = merged;
   }
   const watchPatchTouched = [
+    // 11-19 全量测试：取景档位与窗口句柄原来不在名单里 → 校验通过却被静默丢掉（设置页改了不生效）
+    patch.watchMode, patch.watchWindowHwnd,
     patch.watchPrompt, patch.watchDetailPrompt, patch.watchCutAbs, patch.watchCutSpike,
     patch.watchCutGapSec, patch.watchIntegralLight,
     patch.watchStillWidth, patch.watchStillHeight,
@@ -725,9 +796,6 @@ export function applyPatch(config: Dict, patch: PetSettingsPatch): Dict {
     next.watch = watch;
   }
   // 识图与说话合成一次：写在 model 段顶层（11-16 m21452）
-  if (patch.mergeLook !== undefined) {
-    next.model = { ...(asDict(next.model) ?? {}), mergeLook: patch.mergeLook };
-  }
   // 【汐儿 · 11-17 第 5 批（三）】嗓子四块：把四套字段存进 voice.presets，并把选中的那套套进 model.tts。
   //   放在最后，保证它压过上面按 voiceMode/voiceProtocol 重建出来的那份（老字段继续兼容）。
   if (patch.voicePick !== undefined || patch.voicePresets !== undefined) {
@@ -736,16 +804,41 @@ export function applyPatch(config: Dict, patch: PetSettingsPatch): Dict {
     const stored = asDict(voice.presets) ?? {};
     const merged: Record<string, VoicePreset> = {};
     for (const key of VOICE_PICKS) merged[key] = (asDict(stored[key]) ?? {}) as VoicePreset;
-    const previous = pickByProtocolOf(asDict(next.model)?.tts);
+    const previous = pickBefore;
     const live = voicePresetOf(asDict(next.model)?.tts);
-    if (previous !== pick) merged[previous] = { ...live, ...(merged[previous] ?? {}) };
+    // 这次补丁有没有直接改嗓子字段（地址/模型/参考音/提示词/协议）——有就说明 live 属于**新选中那块**
+    const ttsEdited = [
+      patch.voiceMode,
+      patch.voiceEndpoint,
+      patch.voiceModel,
+      patch.voiceBaseUrl,
+      patch.voiceApiKey,
+      patch.clearVoiceApiKey,
+      patch.voiceProtocol,
+      patch.voiceRefAudio,
+      patch.voicePromptText,
+    ].some((value) => value !== undefined);
+    // 优先级固定成：这次显式传的 presets > 刚按补丁重建的 live > 老存档。
+    // 11-19 全量测试查出两处反了：①切走时旧存档压过 live（改完一切档位就弹回）
+    // ②选中那一块用 live 压住 incoming（页面上填的新值存不进去）。
     if (patch.voicePresets !== undefined) {
       for (const key of VOICE_PICKS) {
         const incoming = patch.voicePresets[key];
         if (incoming !== undefined) merged[key] = { ...(merged[key] ?? {}), ...incoming } as VoicePreset;
       }
     }
-    merged[pick] = { ...live, ...(merged[pick] ?? {}) };
+    const incomingPick = patch.voicePresets?.[pick];
+    if (previous !== pick && !ttsEdited) {
+      // 纯换块：把当前这套（live）存进它自己那一块，新选中的那块用存档 + 这次显式传的字段。
+      // live 只属于 previous，绝不能拿来覆盖新块（否则切回 tts 会带上 system 的字段）。
+      merged[previous] = { ...(merged[previous] ?? {}), ...liveBefore };
+      merged[pick] = { ...(merged[pick] ?? {}), ...(incomingPick ?? {}) };
+    } else if (previous !== pick) {
+      // 换块同时又改了字段：改动属于**新选中的那块**（页面上填的就是这一页）
+      merged[pick] = { ...(merged[pick] ?? {}), ...live, ...(incomingPick ?? {}) };
+    } else {
+      merged[pick] = { ...(merged[pick] ?? {}), ...live, ...(incomingPick ?? {}) };
+    }
     const modelSection = { ...(asDict(next.model) ?? {}) };
     modelSection.tts = ttsFromPreset(pick, merged[pick]);
     next.model = modelSection as typeof next.model;

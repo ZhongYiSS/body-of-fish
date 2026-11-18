@@ -19,7 +19,8 @@ export interface SenseSource {
   reminder: 'timer';
 }
 
-export type SenseOrigin = 'ear' | 'watch' | 'menu' | 'bridge' | 'dsh' | 'timer';
+// hotkey = 全局快捷键（Alt+T 听一句 / Alt+G 看一眼）；和 menu 分开，查账时能分清是点的还是按的。
+export type SenseOrigin = 'ear' | 'watch' | 'menu' | 'hotkey' | 'bridge' | 'dsh' | 'timer';
 
 const LEVEL_OF: Record<SenseKind, Level> = {
   heard: 3,

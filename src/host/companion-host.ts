@@ -17,6 +17,7 @@ import { mkdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 
 import { THUMB_BYTES } from './companion';
+import { ddaInput, ddaVf } from './capture-source';
 
 /** 跑一个命令，收下 stdout（stderr 只留最后一行用于报错）。 */
 function run(command: string, args: string[], timeoutMs = 10_000): Promise<Buffer> {
@@ -83,13 +84,13 @@ export function createScreenCapture(options: ScreenCaptureOptions): ScreenCaptur
       await Promise.all([
         run(ffmpeg, [
           '-hide_banner', '-loglevel', 'error',
-          '-f', 'gdigrab', '-framerate', '1', '-i', 'desktop',
-          '-frames:v', '1', '-vf', `scale=${width}:-1`, '-y', png,
+          ...ddaInput(),
+          '-frames:v', '1', '-vf', ddaVf(`scale=${width}:-1`), '-y', png,
         ]),
         run(ffmpeg, [
           '-hide_banner', '-loglevel', 'error',
-          '-f', 'gdigrab', '-framerate', '1', '-i', 'desktop',
-          '-frames:v', '1', '-vf', 'scale=64:36,format=gray', '-f', 'rawvideo', '-y', raw,
+          ...ddaInput(),
+          '-frames:v', '1', '-vf', ddaVf('scale=64:36,format=gray'), '-f', 'rawvideo', '-y', raw,
         ]),
       ]);
       shot = png;

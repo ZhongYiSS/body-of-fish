@@ -40,6 +40,14 @@ describe('/v1 真门面', () => {
     assert.match(code, /if \(rest === 'show'\) return method === 'POST' \? v1Forward\('broadcast', 'POST', body\)/u);
   });
 
+  it('body 里的 pet / surface 会搬进查询串（否则 /v1/show 被回 pet 必填、surface 必填）', () => {
+    assert.match(code, /const V1_PET_QUERY = new Set\(\['broadcast', 'say', 'look', 'anim', 'throw', 'lock', 'position', 'lyric'\]\)/u);
+    assert.match(code, /const V1_SURFACE_QUERY = new Set\(\['broadcast', 'lyric'\]\)/u);
+    assert.match(code, /const pet = V1_PET_QUERY\.has\(target\) \? petOfBody\(body\) : ''/u);
+    assert.match(code, /if \(pet !== ''\) query\.push\(`pet=\$\{encodeURIComponent\(pet\)\}`\)/u);
+    assert.match(code, /surface=\$\{encodeURIComponent\(surfaceOfBody\(body\) \?\? 'any'\)\}/u);
+  });
+
   it('do 只认五种动作，别的一律 400', () => {
     assert.match(code, /const V1_DO_ROUTES: Readonly<Record<string, string>> = \{/u);
     for (const kind of ['anim', 'throw', 'lock', 'position', 'lyric']) {

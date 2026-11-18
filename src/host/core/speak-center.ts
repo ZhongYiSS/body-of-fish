@@ -61,19 +61,22 @@ export const SYNTH_GUARD_MS = 30_000;
  */
 export function playGuardMs(audioMs?: number): number {
   const known = audioMs !== undefined && Number.isFinite(audioMs) && audioMs > 0;
-  const raw = known ? audioMs + 3_000 : 60_000;
-  return Math.min(300_000, Math.max(6_000, Math.round(raw)));
+  // 【汐儿 · 11-18 m27977】以前是「时长 + 3 秒、最少 6 秒」：估算偏短就会误杀正常的长句
+  // （11-18 14:40 那条 speak-stuck over 6000ms，真实音频 8 秒）。改成 1.5 倍 + 8 秒、最低 20 秒。
+  const raw = known ? Math.round(audioMs * 1.4) + 6_000 : 40_000;
+  return Math.min(300_000, Math.max(12_000, raw));
 }
 
 /** 单条上限的上下限（哥哥 11-15：保底 60 秒够） */
-const GUARD_MIN_MS = 6_000;
+const GUARD_MIN_MS = 12_000;
 const GUARD_MAX_MS = 60_000;
 
 /** 估算一句话要念多久：4 秒起底，每字 250 毫秒，封顶 60 秒（中文正常语速约 4~5 字/秒） */
 export function speakBudgetMs(text: string): number {
   const chars = Array.from(text).length;
-  const raw = 4_000 + chars * 250;
-  return Math.min(GUARD_MAX_MS, Math.max(15_000, raw));
+  // 这 10 秒是给合成留的余量：guard 从「拿到活儿」就开始计时，不是从出声开始
+  const raw = 10_000 + chars * 400;
+  return Math.min(GUARD_MAX_MS, Math.max(GUARD_MIN_MS, raw));
 }
 
 /**
@@ -84,7 +87,7 @@ export function speakBudgetMs(text: string): number {
  */
 export function jobGuardMs(job: Pick<SpeakJob, 'text' | 'kind'>, audioMs?: number): number {
   const known = audioMs !== undefined && Number.isFinite(audioMs) && audioMs > 0;
-  const raw = known ? audioMs + 5_000 : speakBudgetMs(job.text);
+  const raw = known ? audioMs + 8_000 : speakBudgetMs(job.text);
   return Math.min(GUARD_MAX_MS, Math.max(GUARD_MIN_MS, Math.round(raw)));
 }
 
@@ -110,6 +113,7 @@ export function admitSpeak(
   active: SpeakJob | null,
   pending: readonly SpeakJob[],
   next: SpeakJob,
+  max: number = SPEAK_QUEUE_MAX,
 ): AdmitOutcome {
   if (pending.some((item) => item.key === next.key)) {
     return { accepted: false, queue: [...pending], dropped: [], reason: 'duplicate' };
@@ -140,7 +144,7 @@ export function admitSpeak(
   queue.push(next);
 
   // 超过上限：丢「等级最低、同级里最老」的一条
-  while (queue.length > SPEAK_QUEUE_MAX) {
+  while (queue.length > Math.max(1, max)) {
     let victim = 0;
     for (let i = 1; i < queue.length; i += 1) {
       const rankGap = SPEAK_RANK[queue[i].priority] - SPEAK_RANK[queue[victim].priority];

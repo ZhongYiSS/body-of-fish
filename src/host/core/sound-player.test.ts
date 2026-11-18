@@ -10,19 +10,20 @@
 import { describe, test } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { playbackWatchdogMs, psQuote, systemPlayerCommand, systemPlayerScript } from './sound-player.ts';
+import { playbackWatchdogMs, psQuote, stopFlagOf, systemPlayerCommand, systemPlayerScript } from './sound-player.ts';
 
 describe('playbackWatchdogMs', () => {
-  test('按音频时长 + 3 秒，最低 6 秒、最高 5 分钟', () => {
-    assert.equal(playbackWatchdogMs(1000), 6000);
-    assert.equal(playbackWatchdogMs(12000), 15000);
+  test('按 1.4 倍时长 + 6 秒，最低 12 秒、最高 5 分钟', () => {
+    // 11-18 m27977：旧口径「时长 + 3 秒、最低 6 秒」把长句误杀了；23:40 又按哥哥「别太长」收到 12 秒底
+    assert.equal(playbackWatchdogMs(1000), 12000);
+    assert.equal(playbackWatchdogMs(12000), 22800);
     assert.equal(playbackWatchdogMs(600000), 300000);
   });
 
-  test('时长拿不到（0 / NaN / 负数）也给 6 秒兜底，绝不无限等', () => {
-    assert.equal(playbackWatchdogMs(0), 7000);
-    assert.equal(playbackWatchdogMs(Number.NaN), 7000);
-    assert.equal(playbackWatchdogMs(-5), 7000);
+  test('时长拿不到（0 / NaN / 负数）给 40 秒兜底，绝不无限等', () => {
+    assert.equal(playbackWatchdogMs(0), 12000);
+    assert.equal(playbackWatchdogMs(Number.NaN), 12000);
+    assert.equal(playbackWatchdogMs(-5), 12000);
   });
 });
 
@@ -72,5 +73,26 @@ describe('systemPlayerCommand', () => {
     const encoded = command.args[4] ?? '';
     assert.equal(Buffer.from(encoded, 'base64').toString('utf16le'), systemPlayerScript('C:\\中文 目录\\a.wav', 'audio/wav'));
     assert.match(command.args.slice(0, 4).join(' '), /-STA/u);
+  });
+});
+
+describe('淡出：停旗标 + MediaPlayer', () => {
+  test('停旗标就是「音频路径 + .stop」', () => {
+    assert.equal(stopFlagOf('D:/x/say-1.wav'), 'D:/x/say-1.wav.stop');
+  });
+
+  test('给了停旗标就一定是 MediaPlayer（SoundPlayer 没法改音量）', () => {
+    const script = systemPlayerScript('D:/x/say-1.wav', 'audio/wav', 100, 'D:/x/say-1.wav.stop');
+    assert.ok(script.includes('System.Windows.Media.MediaPlayer'));
+    assert.ok(!script.includes('System.Media.SoundPlayer'));
+    // 一边播一边看旗标，看到就把音量分 10 步降到 0
+    assert.ok(script.includes('Test-Path -LiteralPath'));
+    assert.ok(script.includes('$fade = $true'));
+    assert.ok(script.includes('for ($k = 10; $k -ge 0; $k--)'));
+  });
+
+  test('没有停旗标时，音量 100 的 wav 还走 SoundPlayer（那条最稳）', () => {
+    const script = systemPlayerScript('D:/x/say-1.wav', 'audio/wav', 100);
+    assert.ok(script.includes('System.Media.SoundPlayer'));
   });
 });

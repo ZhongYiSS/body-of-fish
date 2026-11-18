@@ -20,6 +20,7 @@
 import { spawn, type ChildProcess } from 'node:child_process';
 
 import { cropFrame } from './screen-crop';
+import { ddaInput, ddaVf, fitInside } from './capture-source';
 
 /** 采集尺寸：宽高都是 42 的倍数（DeepSeek 的视觉 patch 是 42px 一格，对齐了不浪费 token） */
 // 【11-09 晚 m16589】哥哥：「截的图只有屏幕左上四分之一」「分辨率太低」。
@@ -520,8 +521,8 @@ export function grabStillPng(ffmpegPath?: string): Promise<Buffer> {
     const bin = ffmpegPath || 'ffmpeg';
     const ff = spawn(bin, [
       '-hide_banner', '-loglevel', 'error',
-      '-f', 'gdigrab', '-framerate', '1', '-i', 'desktop', '-frames:v', '1',
-      '-vf', `scale=${CAPTURE_W}:${CAPTURE_H},format=rgb24`,
+      ...ddaInput(), '-frames:v', '1',
+      '-vf', ddaVf(`scale=${CAPTURE_W}:${CAPTURE_H},format=rgb24`),
       '-f', 'image2pipe', '-c:v', 'png', 'pipe:1',
     ], { windowsHide: true });
     const chunks: Buffer[] = [];
@@ -660,14 +661,9 @@ export function createWatchMode(options: WatchOptions): WatchHandle {
       '-hide_banner',
       '-loglevel',
       'error',
-      '-f',
-      'gdigrab',
-      '-framerate',
-      String(CAPTURE_FPS),
-      '-i',
-      'desktop',
+      ...ddaInput(CAPTURE_FPS),
       '-vf',
-      `scale=${CAPTURE_W}:${CAPTURE_H},fps=${CAPTURE_FPS}`,
+      ddaVf(`scale=${CAPTURE_W}:${CAPTURE_H},fps=${CAPTURE_FPS}`),
       '-pix_fmt',
       'rgb24',
       '-f',
@@ -886,8 +882,12 @@ export function createWatchMode(options: WatchOptions): WatchHandle {
       }
     }
 
-    const width = tuning.stillWidth;
-    const height = tuning.stillHeight;
+    // 【汐儿 · 11-18 m27977】以前是硬压成 stillWidth×stillHeight：裁剪后长宽比各不相同，
+    // 1941×1243 塞进 1280×800 就是单向拉伸，窄窗口能把字横拉两倍（哥哥说的「字被拉变形」）。
+    // 现在只按最长边缩、保持比例，PNG 尺寸跟着窗口走。
+    const fitted = fitInside(srcW, srcH, tuning.stillWidth, tuning.stillHeight);
+    const width = fitted.width;
+    const height = fitted.height;
     const raw =
       srcW === width && srcH === height ? Buffer.from(src) : boxDownsample(src, srcW, srcH, width, height);
     const index = delivered + 1;

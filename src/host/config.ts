@@ -34,7 +34,15 @@
  * 本模块是 host 自包含实现（不 import src/shared —— DSH 单文件加载约束）；
  * 浏览器/桌面侧的对应纯逻辑（把成品拍平成渲染列表）在 src/shared/config.ts。
  */
-import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, writeFileSync } from 'node:fs';
+import {
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  readdirSync,
+  renameSync,
+  statSync,
+  writeFileSync,
+} from 'node:fs';
 import { dirname, join } from 'node:path';
 import { parseModelConfig, toConfigSection } from './core/model-config';
 import type { ModelConfig } from './core/model-gateway';
@@ -610,6 +618,46 @@ function voiceSectionField(own: unknown, label: string): { voice?: Record<string
   return Object.keys(out).length > 0 ? { voice: out } : {};
 }
 
+/**
+ * 「多说几句」侧的两个段（11-18 待办第 5 条）：
+ * - `context.rollChars`：换卷字数（800–20000），默认值在 session.ts 的 ROLL_CHARS；
+ * - `mouth.queueMax`：嘴边最多排几条（1–10），默认值在 level.ts 的 MOUTH_QUEUE_MAX。
+ * 这里只把关形状与范围，默认值不复制一份。
+ */
+function contextSectionField(own: unknown, label: string): { context?: Record<string, unknown> } {
+  if (own === undefined || own === null) return {};
+  if (typeof own !== 'object' || Array.isArray(own)) {
+    warnOnce(label + ':context', '「' + label + '」的 context 非法，已忽略');
+    return {};
+  }
+  const src = own as Record<string, unknown>;
+  const out: Record<string, unknown> = {};
+  const value = src.rollChars;
+  if (value !== undefined && value !== null) {
+    if (typeof value === 'number' && Number.isFinite(value) && value >= 800 && value <= 20000) {
+      out.rollChars = Math.round(value);
+    } else warnOnce(label + ':context.rollChars', '「' + label + '」的 context.rollChars 非法，已忽略');
+  }
+  return Object.keys(out).length === 0 ? {} : { context: out };
+}
+
+function mouthSectionField(own: unknown, label: string): { mouth?: Record<string, unknown> } {
+  if (own === undefined || own === null) return {};
+  if (typeof own !== 'object' || Array.isArray(own)) {
+    warnOnce(label + ':mouth', '「' + label + '」的 mouth 非法，已忽略');
+    return {};
+  }
+  const src = own as Record<string, unknown>;
+  const out: Record<string, unknown> = {};
+  const value = src.queueMax;
+  if (value !== undefined && value !== null) {
+    if (typeof value === 'number' && Number.isFinite(value) && value >= 1 && value <= 10) {
+      out.queueMax = Math.round(value);
+    } else warnOnce(label + ':mouth.queueMax', '「' + label + '」的 mouth.queueMax 非法，已忽略');
+  }
+  return Object.keys(out).length === 0 ? {} : { mouth: out };
+}
+
 function mergeEntry(
   base: Record<string, unknown>,
   overlay: Record<string, unknown> | undefined,
@@ -645,6 +693,8 @@ function mergeEntry(
     ...searchSectionField(overlay?.search, label),
     ...voiceSectionField(overlay?.voice, label),
     ...hintSectionField(overlay?.hint, label),
+    ...contextSectionField(overlay?.context, label),
+    ...mouthSectionField(overlay?.mouth, label),
   };
 }
 
@@ -771,11 +821,57 @@ function petPersonaField(own: unknown, label: string, id: string): { whisperProm
 }
 
 /**
- * 唯一读取函数：内置默认 + 用户主配置 + 文件宠物逐字段合并后的完成品聚合。
+ * 读盘缓存（11-18 待办 10.5）：键是三个来源的 mtime+size，命中就返回深拷贝。
+ *
+ * 为什么不用 TTL：TTL 会让「刚保存完就读」读到旧值，而配置错一次就是一场排查。
+ * mtime 变了就重算，手改文件、设置页保存、换配置都能立刻看见；深拷贝保证调用方
+ * 改自己的副本不会把缓存（以及下一次调用）带脏。
+ */
+interface ConfigCacheEntry {
+  key: string;
+  value: Record<string, Record<string, unknown>>;
+}
+let configCache: ConfigCacheEntry | undefined;
+
+/** 内部写盘后主动作废（同一毫秒内写完又读的边界，靠 mtime 分不出来） */
+export function invalidateConfigCache(): void {
+  configCache = undefined;
+}
+
+function stampOf(file: string): string {
+  try {
+    const s = statSync(file);
+    return `${file}@${s.mtimeMs}:${s.size}`;
+  } catch {
+    return `${file}@none`;
+  }
+}
+
+function configStamp(paths: ConfigPaths): string {
+  const parts = [stampOf(paths.defaultFile), stampOf(effectiveUserFile(paths) ?? paths.userFile)];
+  parts.push(stampOf(paths.petDir));
+  for (const petFile of scanPetFiles(paths.petDir)) parts.push(stampOf(petFile.path));
+  return parts.join('|');
+}
+
+/**
+ * 唯一读取入口：命中缓存直接给深拷贝，未命中走 `readAllConfigUncached()`。
  * 返回 { main: {...}, test1: {...}, ... } —— 每个条目都是原文件结构且所有字段已填满，
- * 消费端直接读，不做任何校验/兜底。每次调用重新读文件：修改配置刷新/重启即生效。
+ * 消费端直接读，不做任何校验/兜底。
  */
 export function readAllConfig(paths: ConfigPaths): Record<string, Record<string, unknown>> {
+  const key = configStamp(paths);
+  if (configCache !== undefined && configCache.key === key) return structuredClone(configCache.value);
+  const value = readAllConfigUncached(paths);
+  configCache = { key: configStamp(paths), value };
+  return structuredClone(value);
+}
+
+/**
+ * 真读：内置默认 + 用户主配置 + 文件宠物逐字段合并后的完成品聚合。
+ * 每次调用都重新读文件（缓存层在上面）。
+ */
+function readAllConfigUncached(paths: ConfigPaths): Record<string, Record<string, unknown>> {
   const base = readJsonc(paths.defaultFile);
   if (!base) throw new Error('dsh-pet: 内置默认配置缺失或解析失败（安装损坏）：' + paths.defaultFile);
   const basePets = Array.isArray(base.pets) ? (base.pets as Record<string, unknown>[]) : [];
@@ -1070,6 +1166,7 @@ export function syncUserConfigFromDefault(paths: ConfigPaths): void {
   const raw = readFileSync(paths.defaultFile, 'utf8');
   mkdirSync(dirname(paths.userFile), { recursive: true });
   writeFileSync(paths.userFile, raw, 'utf8');
+  invalidateConfigCache();
 }
 
 /**
