@@ -22,8 +22,20 @@
  *     字会糊；窄窗口更惨（横拉 2 倍）。要缩只用 fitInside()。
  */
 
-/** 抓屏输入：`-f lavfi -i ddagrab=0:framerate=N`（不传 fps 就是它自己的默认节奏）。 */
-export function ddaInput(fps?: number): string[] {
+/**
+ * 抓屏输入：`-f lavfi -i ddagrab=0:framerate=N`（不传 fps 就是它自己的默认节奏）。
+ *
+ * 【汐儿 · 11-19 m30590】`useDda=false` 时退回 gdigrab。哥哥机器上 `watchFfmpeg()`
+ * 曾经硬编码 `D:\AI\GPT-SoVITS\ffmpeg.exe`，那份**没有 ddagrab**（`-filters` 里查不到），
+ * 结果陪伴抓屏连着三次 `No such filter: 'ddagrab'` 直接自动停。能不能用由 `capture.ts`
+ * 的 `hasDdagrab()` 探测，这里只按开关拼参数。
+ */
+export function ddaInput(fps?: number, useDda = true): string[] {
+  if (!useDda) {
+    const args = ['-f', 'gdigrab', '-i', 'desktop'];
+    if (fps !== undefined) args.splice(2, 0, '-framerate', String(fps));
+    return args;
+  }
   const source = fps === undefined ? 'ddagrab=0' : `ddagrab=0:framerate=${fps}`;
   return ['-f', 'lavfi', '-i', source];
 }
@@ -31,8 +43,9 @@ export function ddaInput(fps?: number): string[] {
 /** d3d11 帧下载成普通帧的前缀：任何 scale / format 之前都得先过它。 */
 export const DDA_DOWNLOAD = 'hwdownload,format=bgra';
 
-/** 拼滤镜链：`hwdownload,format=bgra,<rest>`（rest 为空就只下载）。 */
-export function ddaVf(rest: string): string {
+/** 拼滤镜链：`hwdownload,format=bgra,<rest>`（rest 为空就只下载）。gdigrab 出的已经是普通帧，不加前缀。 */
+export function ddaVf(rest: string, useDda = true): string {
+  if (!useDda) return rest.trim();
   const tail = rest.trim();
   return tail === '' ? DDA_DOWNLOAD : `${DDA_DOWNLOAD},${tail}`;
 }

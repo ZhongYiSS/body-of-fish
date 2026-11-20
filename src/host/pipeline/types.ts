@@ -32,6 +32,8 @@ export interface SenseEvent {
   text: string;
   /** 看到的那一屏（png），只有 seen 有 */
   image?: Uint8Array;
+  /** 跟这张图一起冒的表情包名（可选，只有 seen 有） */
+  imageName?: string;
   /** 屏幕目标（窗口标题之类），只有 seen 有 */
   target?: string;
   /** 谁交出来的：ear / watch / menu / bridge / dsh */

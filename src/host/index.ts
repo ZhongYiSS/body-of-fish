@@ -125,7 +125,7 @@ import { generateChat, generateChatViaGateway, type ChatMemoryMessage } from './
 import { audioDurationMs } from './core/audio-duration';
 import { createModelGateway, type SessionChat } from './core/create-model-gateway';
 import { handoffText, imageHandoffText } from './core/bridge-handoff';
-import { parseModelConfig, toConfigSection } from './core/model-config';
+import { fillRemoteBackends, parseModelConfig, toConfigSection } from './core/model-config';
 import { configuredModel } from './model-selection';
 import { applyMemePool, limitPool, pickMeme, readMemePool } from './memes';
 import { createWhisperPoolCache, pickFromWhisperPool, readWhisperPool } from './whisper-pool';
@@ -197,13 +197,14 @@ import { createPetCoreRuntime, type SayOutcome } from './core/create-pet-core';
 import { createChatter } from './chatter';
 import { createCompanion, DEFAULT_INTERVAL_MS, type CompanionHandle } from './companion';
 import { createScreenCapture } from './companion-host';
+import { resolvedFfmpeg } from './capture';
 import {
   createWatchMode,
   normalizeTuning,
   WATCH_FALLBACK_MS as WATCH_FALLBACK_MS_SHARED,
   WATCH_MIN_GAP_MS as WATCH_MIN_GAP_MS_SHARED,
   WATCH_NOTES_MS as WATCH_NOTES_MS_SHARED,
-  grabStillPng,
+  grabStill,
   type WatchHandle,
   type WatchPace,
   type WatchSheetMeta,
@@ -213,6 +214,8 @@ import {
   buildDetailPrompt,
   buildWatchPrompt,
   compressScene,
+  DEFAULT_DETAIL_PROMPT,
+  DEFAULT_WATCH_PROMPT,
   emptyScene,
   idleAllowsSpeak,
   mergeScene,
@@ -223,12 +226,16 @@ import {
   type TalkTopic,
 } from './game-talk';
 import { listWindows, readForeground, type ForegroundInfo } from './idle';
+import { composeGrid, GRID_FRAMES, removeQuietly } from './grid';
+import { DETAIL_STOCK, WATCH_STOCK, freshTemplate } from './legacy-prompts';
+import { contextLine, pushTimeline, readLiveContext, type TimelineEntry } from './screen-context';
 import { normalizeWatchMode, pageName, pickWindow, targetLine, type WatchMode, type WindowInfo } from './screen-target';
 import { searchWeb, wikiLine } from './web-search';
 import { createSubtitleBook } from './bili-subtitle';
 import { createStoryCache } from './bili-story';
 import { createSearchRunner, failedNote, parseToolCall, SEARCH_TOOL_HINT } from './chat-search';
 import { pruneDir } from './retention';
+import { dataLayout, migrateLayoutSync } from './layout';
 import { readTailLines } from './log-tail';
 import { looksLikeEcho } from './memory-echo';
 import { createVoicePlayer } from './core/voice-player';
@@ -243,10 +250,21 @@ import {
   type SpeakJob,
   type SpeakPriority,
 } from './core/speak-center';
-import { applyVoicePick, nextVoicePick, pickOf, voicePickWord } from './core/voice-presets';
-import { STYLE_RULES } from './pipeline/style';
+import { applyVoicePick, nextVoicePick, pickOf, voicePickWord, type VoicePick } from './core/voice-presets';
+import { MEMORY_USAGE_RULES, STYLE_RULES } from './pipeline/style';
+import { reasonBlock } from './pipeline/reason';
 import { MOUTH_QUEUE_MAX, priorityFor } from './pipeline/level';
-import { describeEvent, makeEvent } from './pipeline/sense';
+import { createRegistry } from './pipeline/registry';
+import { EAR_SOURCE, earEvent } from './sources/ear';
+import { MANUAL_SOURCE, manualEvent } from './sources/manual';
+import { VISION_SOURCE, visionEvent } from './sources/vision';
+import { CHAT_MIND } from './minds/chat';
+import { SCREEN_MIND } from './minds/screen';
+import { MOUTH_SINK } from './sinks/mouth';
+import { BUBBLE_SINK } from './sinks/bubble';
+import { HINT_SINK } from './sinks/hint';
+import { ANIM_SINK } from './sinks/anim';
+import { HANDOFF_SINK } from './sinks/handoff';
 import { createMind } from './pipeline/mind';
 import { CARD_INJECT, makeCard, normalizeCardText, parseRemember, pickCards, splitOverflow, touchCards } from './pipeline/cards';
 import type { Card } from './pipeline/cards';
@@ -510,6 +528,18 @@ export function apply(ctx: any): void {
   // 用户数据根：配置与用户素材统一收敛于此（扩展包按 <插件id> 各自建目录）
   const dshHome = resolveDshHome();
   const userRoot = dataDirIn(dshHome);
+  // 【汐儿 · 11-20 m32061】数据目录换新布局：老结构（companion-shots / logs\陪伴 / 空的 陪伴\）
+  // 在启动时搬一次，搬完写 layout.json 做标记。之后所有路径都从 dataLayout() 取。
+  const layout = dataLayout(userRoot);
+  migrateLayoutSync(userRoot, (line) => console.log(line));
+  /**
+   * 屏幕流水（`memory/screens/<日期>.jsonl`）：和「说了什么」分家，只做注入、不进对话历史。
+   *
+   * 为什么声明在这里：下面的 `ctx.effect` 一注册就**当场执行**（清理定时器那一段会 prune 它），
+   * 声明要是写在使用点后面，启动就会 `Cannot access 'screensDir' before initialization`
+   * ——2026-11-20 实测踩到（独立模式日志「初始化某项失败（已跳过）」），别挪回去。
+   */
+  const screensDir = join(userRoot, 'memory', 'screens');
 
   /**
    * 把安装包里带的桥插件装进 DSH（哥哥 11-02 方案 A：包里带插件 + 一键装）。
@@ -1084,7 +1114,9 @@ export function apply(ctx: any): void {
   })();
   /** 某条目配置对应的网关：session 有就接上，这样「走会话」才是真的能走。 */
   const gatewayWithSession = (conf: Record<string, unknown>) => {
-    const modelConfig = parseModelConfig(conf.model);
+    // 【汐儿 · 11-20】留空跟随 AI 设置：这里的 chat 也可能是「空地址 + 空模型名」，
+    // 不补的话这条支线会先撞「还没填服务地址」，而主聊天却好好的。
+    const modelConfig = fillCloudBackend(parseModelConfig(conf.model));
     return createModelGateway({ readConfig: () => modelConfig, session: sessionChat , extraHeaders: backendHeaders });
   };
   // 【本鱼改造 · 旁听吐槽】哥哥 10-30 定的六个模块里留下的那个（chatter）：
@@ -1201,13 +1233,14 @@ export function apply(ctx: any): void {
   // 只补空位：用户自己在配置文件里显式写了 baseUrl/apiKey 的，以他写的为准。
   /** 独立模式里那套「接口地址 + 自定义头」（插件模式下没有） */
   const standaloneConn = ():
-    | { baseUrl: string; apiKey: string; extraHeaders?: Record<string, string> }
+    | { baseUrl: string; model?: string; apiKey: string; extraHeaders?: Record<string, string> }
     | undefined =>
     (
       ctx.standaloneAi as
         | {
             connection?: () => {
               baseUrl: string;
+              model?: string;
               apiKey: string;
               extraHeaders?: Record<string, string>;
             };
@@ -1223,22 +1256,12 @@ export function apply(ctx: any): void {
     if (norm(baseUrl) !== norm(conn.baseUrl)) return undefined;
     return conn.extraHeaders;
   };
-  const fillCloudBackend = (config: ReturnType<typeof parseModelConfig>): ReturnType<typeof parseModelConfig> => {
-    const conn = standaloneConn();
-    if (!conn?.baseUrl) return config;
-    const one = <T extends (typeof config)['vision'] | (typeof config)['tts']>(cap: T): T => {
-      if (cap.backend.kind !== 'remote') return cap;
-      return {
-        ...cap,
-        backend: {
-          ...cap.backend,
-          baseUrl: cap.backend.baseUrl || conn.baseUrl,
-          apiKey: cap.backend.apiKey || conn.apiKey,
-        },
-      };
-    };
-    return { chat: config.chat, vision: one(config.vision), tts: one(config.tts) };
-  };
+  // 【汐儿 · 11-20 m34651】补全交给 core 的唯一实现（fillRemoteBackends）：
+  // 早先这里只补 vision/tts，chat 原样返回 —— 于是 model.chat 里那份历史快照
+  // （DeepSeek 官方地址 + 哥哥自己的 key）永远赢过「AI 设置」，改设置像没生效。
+  // 顺带补 model：识图/嗓子留空模型名时也要落到 AI 设置的模型上，否则报「还没填模型名」。
+  const fillCloudBackend = (config: ReturnType<typeof parseModelConfig>): ReturnType<typeof parseModelConfig> =>
+    fillRemoteBackends(config, standaloneConn());
   servicesProvider = (petId: string): PetServices => {
     const found = findPetInstance(readAllConfig(configPaths), petId);
     const conf = (found?.conf ?? {}) as Record<string, unknown>;
@@ -1254,12 +1277,25 @@ export function apply(ctx: any): void {
   // 新版：截屏 → companion.ts 编排 → 气泡/识图/出声全走 services（一份语义两条入口）。
   // 截两次屏是**故意的**：小图算指纹（2304 字节，快且省内存），整图给识图看（能看清字）。
   const screenCapture = createScreenCapture({
-    ffmpegPath: existsSync('D:\\AI\\GPT-SoVITS\\ffmpeg.exe') ? 'D:\\AI\\GPT-SoVITS\\ffmpeg.exe' : undefined,
-    dir: join(userRoot, 'companion-shots'),
+    ffmpegPath: resolvedFfmpeg(),
+    dir: layout.lookShots,
   });
   let companion: CompanionHandle | null = null;
   /** 陪伴当前实际用的间隔（菜单要据此打 ✓）；跑着时才有意义 */
   let companionIntervalMs = 0;
+  /**
+   * 【汐儿 · 11-19 m30590】配置里那只宠物的陪伴间隔（毫秒）。
+   *
+   * 为什么要有它：`companionIntervalMs` 只在 `startCompanion()` 里赋值、停下就清 0，
+   * 于是「没启动过」时菜单标题只写「看一眼 · 关」，看不到它配的是 20 秒还是 5 分钟
+   * （11-09 m16273 哥哥要求过「关着也要能看见」）。这里是只读兜底，不参与调度。
+   */
+  const configuredCompanionMs = (): number => {
+    const conf = findPetInstance(readAllConfig(configPaths), 'main')?.conf as Record<string, unknown> | undefined;
+    const section = conf?.companion;
+    const n = Number((section as Record<string, unknown> | undefined)?.intervalMs);
+    return Number.isFinite(n) && n > 0 ? n : DEFAULT_INTERVAL_MS;
+  };
   /**
    * 开陪伴。`overrideIntervalMs` 来自右键菜单选的档位——**只对本次生效**，不写配置：
    * 菜单是"临时调一下"的手感，改长期偏好该去设置页；把菜单点击写进配置文件会让
@@ -1357,11 +1393,12 @@ export function apply(ctx: any): void {
             debugTrace('[look] 没有截图路径（capture 没落盘？）');
             return '';
           }
+          const live = await liveContext();
           let seen = '';
           try {
             // 【本鱼 · 11-02】陪伴也要「看得细」：注回会话的是这段详细描述，
             // 说出口的那句仍交给 companionLookPrompt 压成 20 字（见下面 generateChat）。
-            seen = (await servicesProvider('main').eyes.look({ image: shot, prompt: LOOK_DETAIL_PROMPT })).text;
+            seen = (await servicesProvider('main').eyes.look({ image: shot, prompt: lookPrompt(live.title) })).text;
           } catch (error) {
             debugTrace('[look] 识图失败：' + (error instanceof Error ? error.message : String(error)));
             return '';
@@ -1385,7 +1422,13 @@ export function apply(ctx: any): void {
           // 哥哥 11-09：看一眼也走同一个 30 分钟上下文 +「刚看到」，别和对话隔离开
           // 【汐儿 · 11-18 m27977】屏幕想也要知道自己刚说过什么、哥哥刚说过什么，
           // 否则她会对着屏幕反复说同一句（哥哥报的「重复的话」）。
-          const system = petSystemPrompt(now) + (await memoryBlockFor('陪伴')) + (await recentSightBlock());
+          const system =
+            petSystemPrompt(now) +
+            (await memoryBlockFor('陪伴')) +
+            (await recentSightBlock()) +
+            '\n\n' +
+            reasonBlock({ kind: 'watch', idleMs: lastIdleMs }) +
+            contextBlock(live.line);
           const history = await recentMessages();
           const pool =
             now.conf.chatImageEnabled === true
@@ -1437,13 +1480,8 @@ export function apply(ctx: any): void {
         },
         bubble: async (text, opts) => {
           // 【汐儿 · 11-17 第 2 批】陪伴是「看到」触发：产一条 seen（2 级），等级自带。
-          const seen = makeEvent({
-            kind: 'seen',
-            source: 'watch',
-            text,
-            ...(opts?.image === undefined ? {} : { imageName: opts.image }),
-          });
-          noteSense(describeEvent(seen));
+          // 【11-19】改走接线表：`sources/vision` 产事件，`registry.emitSense` 记账。
+          registry.emitSense(visionEvent({ text, ...(opts?.image === undefined ? {} : { imageName: opts.image }) }));
           // 【汐儿 · 11-16】不再「先冒泡再说」：记下这句话，等音频真的开始由 runSpeakClip 写，
           // 气泡和声音同一个起点。合成慢就 400 毫秒后先冒一行占位，真出声时被正式气泡盖掉。
           if (!companionSpeaks) {
@@ -1553,12 +1591,10 @@ export function apply(ctx: any): void {
   // **故意不往 DSH 会话里贴图**：一张 798×462 拼图约 173KB base64，
   // 攒到 DSH 的 20MiB 上限就会把历史里的老图永久换成路径占位，
   // 前缀缓存从那一张往后全废（社区实测每省略一张后面十几万 token 重算）。
-  const watchFfmpeg = (): string | undefined => {
-    const fromEnv = process.env.DSH_PET_FFMPEG;
-    if (typeof fromEnv === 'string' && fromEnv.trim() !== '') return fromEnv.trim();
-    const bundled = 'D:\\AI\\GPT-SoVITS\\ffmpeg.exe';
-    return existsSync(bundled) ? bundled : undefined;
-  };
+  // 【汐儿 · 11-19 m30590】以前这里写死 `D:\AI\GPT-SoVITS\ffmpeg.exe`，那份**没有 ddagrab**，
+  // 陪伴抓屏连着三次 `No such filter: 'ddagrab'` 后自动停（哥哥：打开陪伴过一会儿它自己关了）。
+  // 现在交给 `capture.ts` 的 `resolvedFfmpeg()`：按候选顺序挑第一份真带 ddagrab 的。
+  const watchFfmpeg = (): string | undefined => resolvedFfmpeg();
   // —— v2（本鱼 · 11-09 晚）：**出图 ≠ 说话** ——
   // 哥哥的原话：「画面并不是一变化一看完图他就开始发言，而是需要等一个契机」。
   // 所以拆成两步：
@@ -1621,10 +1657,17 @@ export function apply(ctx: any): void {
    * 提示词模板：空串 = 用内置默认。
    * 【汐儿 · 11-16 m21304】只剩一套：哥哥说「只需要一套，不用再去切换提示词增加消耗」。
    */
+  /**
+   * 【11-20 体检】配置里存着的模板，等于出厂默认（含历史版本）的一律当「没设过」。
+   * 不然代码改提示词只是自娱自乐：老配置里那份副本会一直盖在上面（实测陪伴到 0.6
+   * 还在用 0.5.0 的模板，看不到 {{window}} / {{context}}）。
+   */
   const watchTemplates = (): { prompt: string; detail: string } => {
     const section = watchSection();
-    const str = (value: unknown): string => (typeof value === 'string' ? value : '');
-    return { prompt: str(section.prompt), detail: str(section.detailPrompt) };
+    return {
+      prompt: freshTemplate(section.prompt, WATCH_STOCK),
+      detail: freshTemplate(section.detailPrompt, DETAIL_STOCK),
+    };
   };
   /** 两次开口至少隔多久（秒 → 毫秒），默认 45 秒 */
   const watchTalkGapMs = (): number => {
@@ -1662,6 +1705,45 @@ export function apply(ctx: any): void {
   let watchSceneSavedAt = 0;
   /** 上一次量到的键鼠空闲时长（毫秒）；-1 = 还没量过 */
   let lastIdleMs = -1;
+  /**
+   * 「他这会儿」的公共时间线（哥哥 m31134：窗口名/网址/空闲不只给陪伴）。
+   * 聊天、一眼看、回看、说一句都往这一份里记；谁的模型调用前谁拿一次。
+   */
+  let liveTimeline: TimelineEntry[] = [];
+  /**
+   * 现读一次前台 → 一行上下文（读不到就空串）。
+   * 读一次 PowerShell 要 0.45 秒（冷启 0.8 秒），聊天本来就只等一两秒，不能每次都白等 ——
+   * 5 秒内复用同一份（时间线/空闲都是慢变量，5 秒的偏差看不出来）。
+   */
+  let liveCacheAt = 0;
+  let liveCacheLine = '';
+  let liveCacheTitle = '';
+  const liveContext = async (): Promise<{ line: string; title: string }> => {
+    const now = Date.now();
+    if (liveCacheAt !== 0 && now - liveCacheAt < 5_000) {
+      return { line: liveCacheLine, title: liveCacheTitle };
+    }
+    const got = await readLiveContext({
+      readForeground,
+      tidy: pageName,
+      timeline: () => liveTimeline,
+      remember: (label, at) => {
+        liveTimeline = pushTimeline(liveTimeline, { at, label });
+      },
+    });
+    if (got.idleMs >= 0) lastIdleMs = got.idleMs;
+    if (got.line !== '') {
+      liveCacheAt = now;
+      liveCacheLine = got.line;
+      liveCacheTitle = got.title;
+    }
+    return { line: got.line, title: got.title };
+  };
+  /** 上下文块的固定写法：空串就什么都不加。 */
+  const contextBlock = (line: string): string =>
+    line === ''
+      ? ''
+      : `\n\n【他这会儿】${line}\n（这是背景：你知道他在忙什么，别一条条念出来，也别反问他「你在干嘛」。）`;
   /**
    * 查资料的账本（本鱼 · 11-10 m18596）。
    * 按名字缓存 6 小时、每天最多查 12 个不同的名字——同一款游戏只烧一次配额，
@@ -1732,24 +1814,30 @@ export function apply(ctx: any): void {
     try {
       const dir = join(userRoot, 'logs');
       mkdirSync(dir, { recursive: true });
-      appendFileSync(join(dir, 'chat-search.log'), `${new Date().toISOString()} ${line}\n`);
+      noteLog('mind.log', 'search', line);
     } catch {
       /* 日志写不进去不能影响回话 */
     }
   };
   /** 联网查资料的总开关：只有显式写 `search.enabled = false` 才算关（默认开） */
+  /** 耳朵常驻（配置 ear.resident；没设 = 关。菜单与设置页改的是同一个字段） */
+  const earResident = (): boolean => {
+    const found = findPetInstance(readAllConfig(configPaths), 'main');
+    const section = (found?.conf.ear ?? null) as Record<string, unknown> | null;
+    return section?.resident === true;
+  };
   const searchEnabled = (): boolean => {
     const found = findPetInstance(readAllConfig(configPaths), 'main');
     const section = (found?.conf.search ?? null) as Record<string, unknown> | null;
     return section?.enabled !== false;
   };
   const searchRunner = createSearchRunner();
-  const watchSceneDir = join(userRoot, '陪伴');
+  const watchSceneDir = layout.watchNotes;
   const watchScenePath = join(watchSceneDir, 'scene.json');
   // 【汐儿 · 11-11 m20008】视频模式改成「单张图 + 整片剧情梗概」：
   // 字幕落 `陪伴\字幕`，压好的梗概落 `陪伴\剧情`（哥哥要求分好类、定时删）。
-  const storySubtitleDir = join(watchSceneDir, '字幕');
-  const storyTextDir = join(watchSceneDir, '剧情');
+  const storySubtitleDir = layout.watchSubtitles;
+  const storyTextDir = layout.watchStory;
   /** 视频、网页模式只要单张（宫格太慢）；游戏维持单帧 + 六宫格 */
   const storyCache = createStoryCache({
     subtitleDir: storySubtitleDir,
@@ -1811,8 +1899,63 @@ export function apply(ctx: any): void {
   /** 哥哥 11-09 晚 m16399：「我得看看笔记和上下文的记录，还有识图到底看了些什么」。
    *  所以每次陪伴出图都留档：${userRoot}/logs/陪伴/YYYY-MM-DD.jsonl 一行 + sheets/ 里一张 PNG。
    *  写失败只丢记录，绝不影响看护本身。 */
-  const watchLogDir = join(userRoot, 'logs', '陪伴');
-  const watchSheetDir = join(watchLogDir, 'sheets');
+  const watchLogDir = layout.watchNotes;
+  const watchSheetDir = layout.watchShots;
+  /* 【汐儿 · 11-19 m30766/m30770】陪伴攒宫格：环形缓冲留最近 6 帧（每张 ~150KB），
+   * 攒够 3 张、且离上次拼图超过 20 秒才拼一张 3×2 —— 拼一次 ~0.4 秒，别每张都拼。
+   * 手动「看一眼」走 lookOnce，不走这里，保持单张（哥哥定的）。 */
+  const gridDir = join(watchSheetDir, 'grid');
+  const gridRing: { at: number; image: Buffer }[] = [];
+  let gridLastAt = 0;
+  let watchTimeline: TimelineEntry[] = [];
+  /** 新一轮陪伴开始/结束都清一遍：旧帧拼进新宫格 = 她描述的是十几分钟前的屏幕（11-20 哥哥问「拼图做了吗」时查出来的） */
+  const resetGridRing = (): void => {
+    gridRing.length = 0;
+    gridLastAt = 0;
+    watchTimeline = [];
+  };
+  const rememberGridFrame = (image: Buffer, at: number): void => {
+    gridRing.push({ at, image });
+    while (gridRing.length > GRID_FRAMES) gridRing.shift();
+  };
+  // 【11-20 体检】这里出的是 JPEG，字段还叫 png 会误导后来人（也误导我自己一次）
+  const maybeComposeGrid = async (): Promise<{ image: Buffer; frames: number; ms: number } | null> => {
+    const now = Date.now();
+    if (gridRing.length < 3 || now - gridLastAt < 20_000) return null;
+    const bin = resolvedFfmpeg();
+    if (bin === undefined) return null;
+    const picked = gridRing.slice(-GRID_FRAMES);
+    const files: string[] = [];
+    try {
+      await mkdir(gridDir, { recursive: true });
+      for (let i = 0; i < picked.length; i += 1) {
+        const frame = picked[i] as { at: number; image: Buffer };
+        const file = join(gridDir, `f${i}-${frame.at}.jpg`);
+        await writeFile(file, frame.image);
+        files.push(file);
+      }
+      const out = join(gridDir, `grid-${now}.jpg`);
+      const result = await composeGrid({
+        frames: files.map((file, i) => ({ file, at: (picked[i] as { at: number }).at })),
+        out,
+        ffmpegPath: bin,
+      });
+      if (!result.ok) {
+        debugTrace('[watch] 拼宫格失败：' + String(result.message ?? ''));
+        return null;
+      }
+      const image = await readFile(result.out);
+      gridLastAt = now;
+      noteLog('mind.log', 'grid', `frames=${result.frames} ms=${result.ms} bytes=${image.length}`);
+      return { image, frames: result.frames, ms: result.ms };
+    } catch (error) {
+      debugTrace('[watch] 拼宫格出错：' + (error instanceof Error ? error.message : String(error)));
+      return null;
+    } finally {
+      removeQuietly(files);
+      removeQuietly([join(gridDir, `grid-${now}.jpg`)]);
+    }
+  };
   const appendWatchLog = (entry: Record<string, unknown>): void => {
     void (async () => {
       try {
@@ -1828,7 +1971,9 @@ export function apply(ctx: any): void {
     try {
       await mkdir(watchSheetDir, { recursive: true });
       const stamp = new Date().toISOString().replace(/[:.]/g, '-');
-      const name = `${stamp}_${meta.reason}.png`;
+      // 【11-20 体检】内容是 JPEG（encodeJpeg 出的），扩展名别再说谎；
+      // 老的 .png 清理时一并收（见 pruneWatchSheets）。
+      const name = `${stamp}_${meta.reason}.jpg`;
       await writeFile(join(watchSheetDir, name), png);
       await pruneWatchSheets();
       return name;
@@ -1836,16 +1981,15 @@ export function apply(ctx: any): void {
       return '';
     }
   };
-  /** 哥哥 11-09 晚 m16721「留一天吧」；11-16 体检补上总量上限：一天真能攒到 279MB / 235 张。
+  /** 哥哥 11-09 晚 m16721 说留一天；11-20 m32088 改成「别留太多」→ 3 天 / 150MB（原来是 1 天 / 200MB）。
    *  规则在 ./retention（先按 24 小时、再按 200MB，从最老的删，永远留最新 20 张）。 */
   const pruneWatchSheets = async (): Promise<void> => {
-    await pruneDir(watchSheetDir, {
-      now: Date.now(),
-      keepDays: 1,
-      maxBytes: 200 * 1024 * 1024,
-      ext: '.png',
-      log: (line) => console.log(line),
-    });
+    const now = Date.now();
+    const log = (line: string): void => console.log(line);
+    // 0.6 起是 .jpg；0.5.x 留下的是 .png（内容同样是 JPEG），两种都要收，不然老图永远清不掉。
+    for (const ext of ['.jpg', '.png']) {
+      await pruneDir(watchSheetDir, { now, keepDays: 3, maxBytes: 150 * 1024 * 1024, ext, log });
+    }
   };
   const watchSheet = async (png: Buffer, meta: WatchSheetMeta): Promise<void> => {
     const eyes = servicesProvider('main').eyes.available();
@@ -1890,7 +2034,18 @@ export function apply(ctx: any): void {
       dropHint('watch');
       return;
     }
+    // 【汐儿 · 11-19 m30770】他这会儿：①窗口时间线（名字变了才记）②离开多久 ③窗口形状+屏幕尺寸
+    if (title !== '') watchTimeline = pushTimeline(watchTimeline, { at: t0, label: title });
+    const screenCtx = contextLine({
+      timeline: watchTimeline,
+      idleMs: fg.idleMs,
+      rect: targetWin?.rect ?? fg.rect,
+      screen: fg.screen,
+      now: t0,
+    });
     let spoke = '';
+    let gridFrames = 0;
+    let gridMs = 0;
     let gateBusy = false;
     /**
      * 说一句。三道闸都在这：45 秒间隔 / 他停手了（重要性 3 例外）/ 接入接管。
@@ -1942,6 +2097,12 @@ export function apply(ctx: any): void {
       const found = findPetInstance(readAllConfig(configPaths), 'main');
       const persona = found ? petSystemPrompt(found) : '';
       const tpl = watchTemplates();
+      // 【汐儿 · 11-19 m30766】攒够就拼一张 3×2 送识图，比单帧更能看出「刚才在干嘛」
+      rememberGridFrame(png, t0);
+      const grid = await maybeComposeGrid();
+      gridFrames = grid === null ? 0 : grid.frames;
+      gridMs = grid === null ? 0 : grid.ms;
+      const lookImage = grid === null ? png : grid.image;
       // 【汐儿 · 11-16 m21304】一套提示词；「查不查」交给模型自己判断（它输出 [[web_search: 词]]）
       const prompt = buildWatchPrompt({
         scene: watchScene,
@@ -1952,6 +2113,8 @@ export function apply(ctx: any): void {
         persona,
         cropped: meta.cropped,
         window: winLine,
+        context: screenCtx,
+        ...(grid === null ? {} : { grid: true }),
         ...(story !== null ? { bili: story.summary } : {}),
         impNeed: watchImpNeed(),
         template: tpl.prompt,
@@ -1990,7 +2153,7 @@ export function apply(ctx: any): void {
         }
       };
       // 只此一次调用：要说的话、关键点、重要性、现况一起回来
-      const seen = await servicesProvider('main').eyes.look({ image: png, prompt, onDelta });
+      const seen = await servicesProvider('main').eyes.look({ image: lookImage, prompt, onDelta });
       const noteMs = Date.now() - t0;
       const reply = parseWatchReply(String(seen.text ?? ''));
       const idleMs = fg.idleMs;
@@ -2001,10 +2164,10 @@ export function apply(ctx: any): void {
       if (reply.detail !== '' && meta.cropped) {
         const d0 = Date.now();
         try {
-          const still = await grabStillPng(watchFfmpeg());
+          const still = await grabStill(watchFfmpeg());
           const ask = await servicesProvider('main').eyes.look({
             image: still,
-            prompt: buildDetailPrompt(reply.detail, tpl.detail),
+            prompt: buildDetailPrompt(reply.detail, tpl.detail, title),
           });
           detailText = String(ask.text ?? '').trim().replace(/\s+/g, ' ').slice(0, 80);
         } catch (error) {
@@ -2043,6 +2206,7 @@ export function apply(ctx: any): void {
         kind: meta.kind,
         score: Math.round(meta.score),
         sheet: sheetName,
+        grid: gridFrames === 0 ? null : { frames: gridFrames, ms: gridMs },
         note: noteText,
         imp: reply.imp,
         noteMs,
@@ -2146,6 +2310,19 @@ export function apply(ctx: any): void {
   let watchPace: WatchPace = 'normal';
   /** 按节奏给「够不够格开口」的重要性门槛：密档 1、正常/轻 2（哥哥 11-09 晚：「密档也几乎不说话」）。 */
   const watchImpNeed = (): number => (watchPace === 'dense' ? 1 : 2);
+  /**
+   * 菜单要显示的档位：跑着时用内存里的，关着时读存档。
+   *
+   * 【11-20 哥哥 m34789「陪伴开关状态不会正常切换」】原来 `watchPace` 开机写死 'normal'，
+   * 关着的时候标题永远显示「正常」，换过档位也看不出来——现在关着也照实显示上次的档。
+   */
+  const watchPaceNow = (): WatchPace => {
+    if (watchRunning()) return watchPace;
+    const conf = (findPetInstance(readAllConfig(configPaths), 'main')?.conf ?? {}) as Record<string, unknown>;
+    const saved = ((conf.watch ?? {}) as Record<string, unknown>).pace;
+    if (saved === 'calm' || saved === 'normal' || saved === 'dense') return saved;
+    return watchPace;
+  };
   // 【汐儿 · 11-10 m17532】原来这里有个 20 秒「过期就不说」的预算（m16589 定的），
   // 结果那 20 秒会把整条消息吞掉。哥哥说：延迟该想办法，不是把话丢了。已撤销。
   const startWatch = (pace?: WatchPace): { ok: true } | { ok: false; message: string } => {
@@ -2171,6 +2348,7 @@ export function apply(ctx: any): void {
         raw.watch !== null && typeof raw.watch === 'object' ? (raw.watch as Record<string, unknown>) : {};
       raw.watch = { ...section, autoStart: true };
     });
+    resetGridRing();
     if (!watch) {
       watch = createWatchMode({
         ffmpegPath: watchFfmpeg(),
@@ -2279,13 +2457,24 @@ export function apply(ctx: any): void {
     '看一眼这张图，只回答三点，每点一行：1) 他在用什么软件、在干什么（说人话，例如「在改设置页」「在打游戏」）；'
     + '2) 画面里能核对的具体东西：数字、按钮、报错的大意（不要念文件名和路径）；'
     + '3) 有没有卡住、出错、在等。看不清就写「看不清」。200 字以内。';
+  /** 识图提示词带上「这是哪个窗口」，省得它猜（哥哥 m31134）。 */
+  const lookPrompt = (windowName: string): string =>
+    windowName === '' ? LOOK_DETAIL_PROMPT : `${LOOK_DETAIL_PROMPT}\n（这应该是「${windowName}」窗口的截图。）`;
   const lookOnce = async (): Promise<{ ok: boolean; message?: string }> => {
+    const lookT0 = Date.now();
+    const lookMark = (what: string): void => {
+      noteLog('mind.log', 'look', `${what} +${Date.now() - lookT0}ms`);
+    };
+    lookMark('begin');
     // 【汐儿 · 11-15 23:16】一眼看**不再打断**正在说的话（哥哥定：陪伴、一眼看不该掐语音）。
     touchUser();
     // 【汐儿 · 11-16 晚 m24151】这是哥哥手按的动作：先把「在听 / 在想」撤掉，
     // 否则他按完看一眼，结果那句 high 也会被 earMuted() 挡掉——看着就像「看一眼把语音挤没了」。
     setEarPhase('idle');
     dropHint('think');
+    // 【11-20 m31853】灯要跟着他按下去那一刻亮：一眼看整轮 4~5 秒里，
+    // 截屏 ~0.5 秒 + 识图 2~5 秒 + 生成 1~2 秒，以前灯只在最后一段亮，看着像「没反应，最后闪一下」。
+    pushHint('watch', '【在看】', 'task');
     // 先冒「正在偷看」：截屏 + 识图 + 对话要好几秒，不冒的话哥哥只会觉得「没反应」。
     // 【汐儿 · 11-16】封顶 30 秒；成功说完立刻撤掉（失败那句 18 秒自己会走）。
     const fail = async (message: string): Promise<{ ok: false; message: string }> => {
@@ -2298,10 +2487,13 @@ export function apply(ctx: any): void {
     try {
       await screenCapture.capture();
       const shot = screenCapture.lastShotPath();
+      lookMark('shot');
       if (!shot) return fail('还没截到图');
       const eyes = servicesProvider('main').eyes.available();
       if (!eyes.ready) return fail(`识图接口没配好：${eyes.reason?.message ?? '未知原因'}`);
-      const seen = await servicesProvider('main').eyes.look({ image: shot, prompt: LOOK_DETAIL_PROMPT });
+      const live = await liveContext();
+      const seen = await servicesProvider('main').eyes.look({ image: shot, prompt: lookPrompt(live.title) });
+      lookMark('eyes');
       const description = (seen.text ?? '').trim();
       if (!description) return fail('识图没说出画面');
       // 接入 DSH 开着：身体只说"我看到了什么"，说什么交给会话（哥哥 11-09 选 A）
@@ -2313,11 +2505,18 @@ export function apply(ctx: any): void {
       const found = findPetInstance(readAllConfig(configPaths), 'main');
       if (!found) return fail('找不到桌宠配置');
       // 刚看到的那张图本身就是这次的话头；再带上最近 10 分钟的笔记（如果陪伴同时开着）
-      const system = petSystemPrompt(found) + (await memoryBlockFor('看一眼')) + (await recentSightBlock());
+      const system =
+        petSystemPrompt(found) +
+        (await memoryBlockFor('看一眼')) +
+        (await recentSightBlock()) +
+        '\n\n' +
+        reasonBlock({ kind: 'look', idleMs: lastIdleMs }) +
+        contextBlock(live.line);
       const pool =
         found.conf.chatImageEnabled === true
           ? limitPool(memePoolFor(found.entry, found.conf), Number(found.conf.chatImageLimit))
           : [];
+      lookMark('gen');
       const generated = await thinkOnScreen((signal) =>
         usesOwnModel(found.conf)
           ? generateChatViaGateway(
@@ -2363,6 +2562,9 @@ export function apply(ctx: any): void {
       return { ok: true };
     } catch (error) {
       return fail(error instanceof Error ? error.message : String(error));
+    } finally {
+      // 兜底：成功时这盏已经在 show() 里灭了，这里只负责失败/提前 return 不留灯。
+      dropHint('watch');
     }
   };
   /**
@@ -2376,7 +2578,7 @@ export function apply(ctx: any): void {
     try {
       const dir = join(userRoot, 'logs');
       mkdirSync(dir, { recursive: true });
-      appendFileSync(join(dir, 'say-loud.log'), `${new Date().toISOString()} ${line}\n`);
+      noteLog('mouth.log', 'say-loud', line);
     } catch {
       /* 日志写不进去不能影响出声 */
     }
@@ -2401,7 +2603,8 @@ export function apply(ctx: any): void {
    * 常驻嗓子：一个养着 MediaPlayer 的 PowerShell，每句只多 ~200ms（现起要 1.7 秒）。
    * 起不来就 `ready === false`，播放退回 ffplay。
    */
-  const voicePlayer = createVoicePlayer();
+  // 常驻嗓子起不来要留下痕迹（11-20：daemon 静默失败会让每句都退化成 1.5 秒的一次性播放器）
+  const voicePlayer = createVoicePlayer({ log: (line: string) => noteVoiceIssue(line) });
   // 开机就预热常驻嗓子：不然第一句话要等 PowerShell 起来（1.5 秒），字和声就错开了
   ctx.effect(() => {
     voicePlayer.warm();
@@ -2473,13 +2676,13 @@ export function apply(ctx: any): void {
     activePlay = null;
   };
   /** 播放留痕：ffplay 的退出码与 stderr 以前被 stdio:'ignore' 吞掉，
-   *  「有气泡没声音」在外面看不出任何痕迹。失败（或秒退）时写一行到 logs\voice-play.log。
+   *  「有气泡没声音」在外面看不出任何痕迹。失败（或秒退）时写一行到 logs\mouth.log（tag=play）。
    *  【汐儿 · 11-10 m17532】哥哥同意加，只为定位，不改行为。 */
   const noteVoiceIssue = (line: string): void => {
     try {
       const dir = join(userRoot, 'logs');
       mkdirSync(dir, { recursive: true });
-      void appendFile(join(dir, 'voice-play.log'), `${new Date().toISOString()} ${line}\n`).catch(() => {});
+      noteLog('mouth.log', 'play', line);
     } catch {
       /* 记不了日志不能影响出声 */
     }
@@ -2494,11 +2697,30 @@ export function apply(ctx: any): void {
     try {
       const dir = join(userRoot, 'logs');
       mkdirSync(dir, { recursive: true });
-      void appendFile(join(dir, 'bubble.log'), `${new Date().toISOString()} ${line}\n`).catch(() => {});
+      noteLog('mouth.log', 'bubble', line);
     } catch {
       /* 记不了日志不能影响冒泡 */
     }
   };
+  /**
+   * 账本只留三本（哥哥 11-19 同意合并）：`mouth.log` 嘴 / `sense.log` 耳眼 / `mind.log` 想。
+   *
+   * 为什么并：原来 8 本（speak / voice-play / bubble / say-loud / chat-search / summarize / sense / mind），
+   * 查一次「怎么没声音」要开四五个文件对时间，还常常对不上（时间戳只到毫秒、文件名各写各的）。
+   * 现在按「嘴 / 耳眼 / 想」三路分，每行带 `[tag]` 分清来源，一个 `rg` 就能顺着一条时间线看完。
+   *
+   * 什么时候别用：陪伴的逐张笔记仍走 `logs/陪伴/<日期>.jsonl`（那是数据不是日志，要能被程序读回来）。
+   */
+  const noteLog = (file: 'mouth.log' | 'sense.log' | 'mind.log', tag: string, line: string): void => {
+    try {
+      const dir = join(userRoot, 'logs');
+      mkdirSync(dir, { recursive: true });
+      void appendFile(join(dir, file), `${new Date().toISOString()} [${tag}] ${line}\n`).catch(() => {});
+    } catch {
+      /* 记不了日志不能影响正事 */
+    }
+  };
+
   /**
    * 「听和看」的账本（【汐儿 · 11-17】第 2 批）：每条事件进来时记一行，
    * 出问题时能一眼看出「谁产的、几级、走的哪条路」。等级由事件自带，想和嘴不许改。
@@ -2507,15 +2729,36 @@ export function apply(ctx: any): void {
     try {
       const dir = join(userRoot, 'logs');
       mkdirSync(dir, { recursive: true });
-      void appendFile(join(dir, 'sense.log'), `${new Date().toISOString()} ${line}\n`).catch(() => {});
+      noteLog('sense.log', 'sense', line);
     } catch {
       /* 记不了日志不能影响说话 */
     }
   };
   /**
+   * 接线表（11-19 薄版注册表）：输入 / 想 / 输出三张表在这里登记一次。
+   *
+   * 以后加一条输入，只要写进 `sources/`、在这里多一行；加一种输出同理写 `sinks/`。
+   * `emitSense` 只做「记账 + 扇出」，谁去想仍由上面的流程决定（接管调用顺序是后面的活）。
+   */
+  const registry = createRegistry({
+    log: (line) => {
+      noteSense(line);
+    },
+  });
+  registry.registerSource(EAR_SOURCE);
+  registry.registerSource(MANUAL_SOURCE);
+  registry.registerSource(VISION_SOURCE);
+  registry.registerMind(CHAT_MIND);
+  registry.registerMind(SCREEN_MIND);
+  registry.registerSink(MOUTH_SINK);
+  registry.registerSink(BUBBLE_SINK);
+  registry.registerSink(HINT_SINK);
+  registry.registerSink(ANIM_SINK);
+  registry.registerSink(HANDOFF_SINK);
+  /**
    * 嘴的账本（【汐儿 · 11-17】9.16 ⑦ 定过、今天补上）：每次说话一行，`start / finish / drop / interrupt`。
    *
-   * 为什么单开：`bubble.log` 记的是「字出没出」、`voice-play.log` 记的是「声放没放」，
+   * 为什么单开：`mouth.log` 里 `[bubble]` 记的是「字出没出」、`[play]` 记的是「声放没放」，
    * 但「这句话是根本没进嘴、还是进了被顶掉、还是说了被掐」只有嘴自己知道。
    * 查「她怎么不说话」时先看这份，再顺着 key 去另外两份对时间。
    */
@@ -2523,25 +2766,20 @@ export function apply(ctx: any): void {
     try {
       const dir = join(userRoot, 'logs');
       mkdirSync(dir, { recursive: true });
-      void appendFile(join(dir, 'speak.log'), `${new Date().toISOString()} ${line}\n`).catch(() => {});
+      noteLog('mouth.log', 'speak', line);
     } catch {
       /* 记不了日志不能影响说话 */
     }
   };
   /**
-   * 专项账本（11-18 待办第 7 条）：`mind.log`（两个想谁掐了谁）、`roll.log`（换卷与摘要）。
+   * 专项账本（11-18 待办第 7 条）：`mind.log`（两个想谁掐了谁、换卷与摘要，tag 分开）。
    *
    * 为什么分家：sense.log 是所有事件的时间线，一长就淹；查「刚才那句为什么被取消」
    * 只需要看想的那几行。分出来不影响 sense.log 仍然全记一份。
    */
   const noteTo = (name: string, line: string): void => {
-    try {
-      const dir = join(userRoot, 'logs');
-      mkdirSync(dir, { recursive: true });
-      void appendFile(join(dir, `${name}.log`), `${new Date().toISOString()} ${line}\n`).catch(() => {});
-    } catch {
-      /* 记不了日志不能影响说话 */
-    }
+    // 【11-19】原来按 name 分文件（mind.log / roll.log / …），现在统一进 mind.log，name 变 tag。
+    noteLog('mind.log', name, line);
   };
 
   /** 两个「想」的并发表：同会话新顶旧，4/5 级掐别的会话（11-17 第 3 批） */
@@ -2558,8 +2796,7 @@ export function apply(ctx: any): void {
    * 他点菜单不代表不想听完她正在回的那句话）。
    */
   const noteCommand = (source: 'menu' | 'hotkey' | 'bridge', text: string): void => {
-    const command = makeEvent({ kind: 'command', source, text });
-    noteSense(describeEvent(command));
+    registry.emitSense(manualEvent(source, text));
     const stopped = mind.cancel('screen', `manual-${source}`);
     if (stopped > 0) noteTo('mind', `preempt screen=${stopped} by=${source}`);
   };
@@ -2570,14 +2807,13 @@ export function apply(ctx: any): void {
    */
   const thinkOnScreen = async <T>(fn: (signal: AbortSignal) => Promise<T>): Promise<T> => {
     const run = mind.begin('screen', 2);
-    // 【11-18】屏幕想单独一盏灯（文档 9.9 的 think:screen）：看一眼 / 陪伴在动脑子时，界面上要能看出来。
-    // 主想仍然是 ear 那盏「【在想】」——两路分开，谁也盖不掉谁。
-    pushHint('thinkScreen', '【在看】', 'task');
+    // 【11-20 m31853】这盏灯不再由这里点：它在「截屏 + 识图」都做完之后才轮到，
+    // 亮得晚、灭得快（哥哥看到的就是「话快出来了才冒【在看】」）。
+    // 「在看」统一挂在调用方开始那一刻（lookOnce / 陪伴取帧前），这里只登记并发的想。
     try {
       return await fn(run.signal);
     } finally {
       run.end();
-      dropHint('thinkScreen');
     }
   };
   /**
@@ -2588,6 +2824,18 @@ export function apply(ctx: any): void {
     return new Promise((resolve) => {
       // 先看一眼上一条是不是已经卡死了：是就先掐掉，别让新的一句跟着排队等死（11-15）。
       healStuckPlay();
+      // 【11-20 哥哥 m34789】说层静音：音频照合成，只是不播——气泡、日志、排队语义全不变，
+      //   「开始播」也要照常回调，否则气泡会一直等不到 show()。
+      if (!voiceSpeakOn()) {
+        noteVoiceIssue(`play-skip muted voice.speak=false bytes=${audio.byteLength}`);
+        try {
+          onStart?.();
+        } catch {
+          /* 同上：回调出错不影响收尾 */
+        }
+        resolve();
+        return;
+      }
       // 合成途中被打断（代数变了）：这条已经过时，直接不播。
       if (atEpoch !== undefined && atEpoch !== epoch) {
         noteVoiceIssue(`play-skip stale-epoch epoch=${atEpoch} now=${epoch} bytes=${audio.byteLength}`);
@@ -2857,6 +3105,12 @@ export function apply(ctx: any): void {
   };
   /** 在听或在想：别的声音让路（manual/urgent 例外） */
   const earMuted = (): boolean => earPhaseNow() !== 'idle';
+  /** 【汐儿 · 11-20 m30910】主气泡的「占位权」：碎碎念（1 级）不许盖掉陪伴/一眼看（2~3 级）刚写的那句。
+   * 记一句写到什么时候为止，过了就不管。 */
+  let sayBubbleGuard: { level: number; until: number } | null = null;
+  const markSayGuard = (level: number, duration: number | undefined): void => {
+    sayBubbleGuard = { level, until: Date.now() + Math.max(1_500, duration ?? 6_000) };
+  };
   const writeSayBubble = (
     petId: string,
     source: 'chat' | 'companion',
@@ -2865,6 +3119,8 @@ export function apply(ctx: any): void {
       image?: string;
       duration?: number;
       imageDuration?: number;
+      /** 谁写的：3 = 对话，2 = 陪伴/一眼看，1 = 碎碎念（默认按 source 推） */
+      level?: number;
       /** 第三方投喂用：常驻气泡 / 配一段动画（原 /services/bubble 的 sticky / anim） */
       sticky?: boolean;
       anim?: string;
@@ -2873,13 +3129,16 @@ export function apply(ctx: any): void {
     // 【汐儿 · 11-17 m24756】主气泡**只装她说的话**：只在正在录音那几秒让位。
     // 等待反馈是「状态」，交给副气泡【在想】，不许往主气泡塞占位词。
     if (earPhaseNow() === 'listen') return;
+    const level = payload.level ?? (source === 'companion' ? 2 : 3);
     if (source === 'companion') {
       void servicesProvider('main')
         .bubble.say({ petId, text: payload.text, duration: payload.duration, source: 'companion' })
         .catch(() => {});
+      markSayGuard(level, payload.duration);
       return;
     }
     state.writePet(petId, 'say', payload);
+    markSayGuard(level, payload.duration);
   };
 
   /**
@@ -2887,7 +3146,12 @@ export function apply(ctx: any): void {
    * 全身体只有这里能碰 `pets.<id>.say` —— 碎碎念、say-loud 表情包这些「不等声音」的写法都走它。
    * 以后接进 `mouth.ts` 时，只需要把这一处换成 `mouth.show()`，别处一个都不用动。
    */
-  const writeSayNow = (petId: string, payload: Record<string, unknown>): void => {
+  const writeSayNow = (petId: string, payload: Record<string, unknown>, level = 1): void => {
+    // 【汐儿 · 11-20 m30910】碎碎念不许盖掉她刚说的话：低级别让位给还在显示的高级别气泡
+    if (level < 2 && sayBubbleGuard !== null && Date.now() < sayBubbleGuard.until && sayBubbleGuard.level > level) {
+      noteBubble(`skip-now pet=${petId} level=${level} busy=${sayBubbleGuard.level}`);
+      return;
+    }
     state.writePet(petId, 'say', payload as never);
     noteBubble(`write-now pet=${petId} text=${String(payload.text ?? '').slice(0, 20)}`);
   };
@@ -2913,6 +3177,19 @@ export function apply(ctx: any): void {
   };
   /** 说话音量（0~100）：设置页的 voice.volume；没配按 100 */
   const voiceVolume = (): number => voiceNumber('volume', 100, 0, 100);
+  /**
+   * 出不出声（`voice.speak`，11-20 哥哥 m34789「统一成声音开关」）。
+   *
+   * 干什么：关掉之后所有话头**照常生成、照常冒气泡**，只是不发声——陪伴、聊天、一眼看、
+   * 说一句、碎碎念、桥 /say-loud 全走这一个闸（闸在 playAudio 里，只有一处）。
+   * 没配就是开：老配置里没有这个键，不能因为没写就变静音。
+   */
+  const voiceSpeakOn = (): boolean => {
+    const conf = (findPetInstance(readAllConfig(configPaths), 'main')?.conf ?? {}) as Record<string, unknown>;
+    const section = conf.voice;
+    const raw = section !== null && typeof section === 'object' ? (section as Record<string, unknown>).speak : undefined;
+    return raw !== false;
+  };
   /** 排队多久算过期（从入队算，不重置），默认 15 秒 */
   const voiceStaleMs = (): number => voiceNumber('staleSec', 15, 1, 600) * 1_000;
   /** 句与句之间的空隙，默认 0.5 秒（哥哥 11-15：太长会显得卡卡的） */
@@ -2934,6 +3211,66 @@ export function apply(ctx: any): void {
   const cardInjectCount = (): number => sectionInt('context', 'cardInject', CARD_INJECT, 1, 20);
 
   /**
+   * 合成一句（带体积校验）：极短句（一个字）SAPI 会合成出 46 字节的空 wav（只有文件头），
+   * 合成完先量大小，太小重试一次。
+   *
+   * 【汐儿 · 11-20 半流式】从 runSpeakTextInner 里提出来，好让「提前合成」和「播放」共用同一个入口。
+   */
+  const synthLine = async (line: string): Promise<{ audio: Uint8Array; mime: string } | null> => {
+    const attempt = async (): Promise<{ audio: Uint8Array; mime: string } | null> => {
+      try {
+        const said = await servicesProvider('main').voice.speak({ text: line });
+        if (!said || said.audio.byteLength < 2000) {
+          noteVoiceIssue(`synth-thin bytes=${said?.audio.byteLength ?? 0} say=${line.slice(0, 24)}`);
+          return null;
+        }
+        return said;
+      } catch {
+        return null;
+      }
+    };
+    return (await attempt()) ?? (await attempt());
+  };
+
+  /**
+   * 提前合成的池子：key = 句子文本，value = 已经在跑的那次合成。
+   *
+   * 【汐儿 · 11-20 半流式】生成还是流式的，第一句在整段生成完之前就定型了；
+   * 先开跑合成，等播放侧来取时多半已经好了——这一两秒就是这么省下的。
+   */
+  const synthWarm = new Map<string, { at: number; job: Promise<{ audio: Uint8Array; mime: string } | null> }>();
+  const SYNTH_WARM_TTL_MS = 60_000;
+  const pruneWarmSynth = (): void => {
+    const now = Date.now();
+    for (const [key, hit] of synthWarm) {
+      if (now - hit.at > SYNTH_WARM_TTL_MS) synthWarm.delete(key);
+    }
+  };
+  /** 喊一声「这句先合成着」：同一句只跑一次，重复喊不重来 */
+  const warmSynth = (line: string): void => {
+    const trimmed = String(line ?? '').trim();
+    if (trimmed === '') return;
+    // 嗓子没接上就别预热：播放侧也不会合成，提前跑纯属白花 CPU
+    if (!servicesProvider('main').voice.available().ready) return;
+    pruneWarmSynth();
+    if (synthWarm.has(trimmed)) return;
+    noteLog('mouth.log', 'warm', `start chars=${trimmed.length} say=${trimmed.slice(0, 24)}`);
+    synthWarm.set(trimmed, { at: Date.now(), job: synthLine(trimmed) });
+  };
+  /** 播放侧取货：取到就从池子里拿掉（同一句只享受一次提前合成） */
+  const takeWarmSynth = (line: string): Promise<{ audio: Uint8Array; mime: string } | null> | undefined => {
+    const trimmed = String(line ?? '').trim();
+    const hit = synthWarm.get(trimmed);
+    if (hit === undefined) {
+      noteLog('mouth.log', 'warm', `miss chars=${trimmed.length} say=${trimmed.slice(0, 24)}`);
+      return undefined;
+    }
+    noteLog('mouth.log', 'warm', `hit waited=${Date.now() - hit.at}ms chars=${trimmed.length}`);
+    synthWarm.delete(trimmed);
+    return hit.job;
+  };
+
+  /**
    * 念一段话（仲裁中心内部专用）：**一句话一个气泡，按句依次冒**（哥哥 11-01）。
    *
    * 规矩：
@@ -2944,8 +3281,8 @@ export function apply(ctx: any): void {
    * - 嗓子没配好：整段当一个普通气泡写出去（不能因为没嗓子就不让人看见字）。
    */
   const runSpeakText = async (spec: SpeakSpec, myEpoch: number): Promise<SpeakOutcome> => {
-    // 【汐儿 · 11-16 m21310】说话期间在 hint 通道挂一行【在说】，说完就摘（不占头顶气泡）
-    if (spec.text.trim() !== '') pushHint('say', '【在说】', 'task');
+    // 【汐儿 · 11-20 m30910】【在说】改成**声音真的起来那一刻**才挂（原来在合成前就挂，
+    // 合成要 1.5~3 秒，看起来就是「提示先冒、声音后到」，哥哥说延迟高）。
     try {
       return await runSpeakTextInner(spec, myEpoch);
     } finally {
@@ -2969,28 +3306,14 @@ export function apply(ctx: any): void {
       writeSayBubble(petId, source, image ? { text, image } : { text });
       return { ok: true };
     }
-    // 先把每句的音频**并发**合成好，再一句一句放：这样"两句之间隔 1 秒"才是真的 1 秒。
-    // 极短句（一个字）SAPI 会合成出 46 字节的空 wav（只有文件头），合成完先量大小，太小重试一次。
-    const speakChecked = async (line: string): Promise<{ audio: Uint8Array; mime: string } | null> => {
-      const attempt = async (): Promise<{ audio: Uint8Array; mime: string } | null> => {
-        try {
-          const said = await servicesProvider('main').voice.speak({ text: line });
-          if (!said || said.audio.byteLength < 2000) {
-            noteVoiceIssue(`synth-thin bytes=${said?.audio.byteLength ?? 0} say=${line.slice(0, 24)}`);
-            return null;
-          }
-          return said;
-        } catch {
-          return null;
-        }
-      };
-      return (await attempt()) ?? (await attempt());
-    };
     // 【汐儿 · 11-15 23:20】串行合成、首句优先：并发会把嗓子堵死（实测首句等了 21.7 秒）。
     // 链上第一个就是第一句，后面排着队合成；念到哪、合成到哪，不抢。
     let synthChain: Promise<unknown> = Promise.resolve();
-    const jobs = sentences.map((line) => {
-      const task = synthChain.then(() => speakChecked(line));
+    const jobs = sentences.map((line, i) => {
+      // 首句最可能已经被「提前合成」接走了：直接等它，不排到链子尾巴上
+      const warm = i === 0 ? takeWarmSynth(line) : undefined;
+      const task = warm ?? synthChain.then(() => synthLine(line));
+      // 后面的句子串在首句（哪怕是提前起跑的那次）之后，避免两句同时合成把嗓子堵住
       synthChain = task.then(
         () => undefined,
         () => undefined,
@@ -3038,6 +3361,10 @@ export function apply(ctx: any): void {
           return;
         }
         bubbleOwner = { petId, source };
+        // 【汐儿 · 11-20 m30910】声音起来了才挂【在说】（和气泡同一个起点）
+        // 【11-20 m31853】同时把「在看」撤掉：她已经在说了，屏幕上不该再挂着「正在看」。
+        dropHint('watch');
+        if (spec.text.trim() !== '') pushHint('say', '【在说】', 'task');
         // 【汐儿 · 11-18 m27977】上下文两边同步：她**真说出口**的每句话都在这一刻进卷。
         // 以前只有对话那条路记一次整段（chatWithPet），陪伴 / 一眼看 / 说一句说的话一句都不进卷，
         // 结果她在陪伴里刚说完什么，转头聊天完全不知道 —— 哥哥说的「会说重复的话」就是这么来的。
@@ -3501,9 +3828,7 @@ export function apply(ctx: any): void {
     listen: 60_000,
     ear: 60_000,
     think: 90_000,
-    // 【11-18 自查】屏幕想那盏灯也得有兜底：`thinkScreen` 只靠 dropHint 撤，
-    // 万一某次调用永远不结束，界面会一直挂着「【在看】」。
-    thinkScreen: 90_000,
+    // 【在看】这盏（watch）也归这里兜：只有它一条，「陪伴取帧 / 一眼看」共用同一个 id。
     watch: 90_000,
     say: 90_000,
   };
@@ -3539,14 +3864,20 @@ export function apply(ctx: any): void {
     const found = findPetInstance(readAllConfig(configPaths), 'main');
     if (found) {
       try {
-        const context = await sessionStore.context(6);
-        const prompt = sayOncePrompt({
-          nowMs,
-          summary: context.summary,
-          recent: context.turns,
-          recentSaid: recentSays,
-        });
-        const system = petSystemPrompt(found) + '\n\n' + STYLE_RULES;
+        // 【11-20 m34508】说一句也带记忆块：摘要 / 最近 12 条 / 想说没说 / 记着的事 / 记忆怎么用。
+        // 卷的内容全交给 memoryBlockFor，sayOncePrompt 只留「点了一下说一句」的指令和去重——
+        // 两边都给的话，摘要和最近几句会在 system 和 prompt 里各出现一次，模型容易当成两件事说。
+        const prompt = sayOncePrompt({ nowMs, summary: '', recent: [], recentSaid: recentSays });
+        const live = await liveContext();
+        const memory = await memoryBlockFor('说一句');
+        const system =
+          petSystemPrompt(found) +
+          '\n\n' +
+          STYLE_RULES +
+          '\n\n' +
+          memory +
+          reasonBlock({ kind: 'say', idleMs: lastIdleMs }) +
+          contextBlock(live.line);
         const ask = usesOwnModel(found.conf)
           ? generateChatViaGateway(gatewayFor(found.conf), system, [], prompt, [], 8_000)
           : generateChat(ctx, system, [], prompt, [], configuredModel(found.conf, 'chatModel'));
@@ -3726,12 +4057,8 @@ export function apply(ctx: any): void {
    * 【汐儿 · 11-17 m26051】右鍵菜单的「状态：嗓子」按四块循环：模型直连 → 本地 TTS → Windows → Edge → 回模型直连。
    * 和设置页共用 `applyVoicePick`（同一份口径），切块时别块的地址/密钥/参考音一个不丢。
    */
-  const cycleVoicePick = (): { ok: boolean; message?: string } => {
-    const found = findPetInstance(readAllConfig(configPaths), 'main');
-    const conf = (found?.conf ?? {}) as Record<string, unknown>;
-    const modelSection = conf.model;
-    const current = pickOf(conf, modelSection !== null && typeof modelSection === 'object' ? (modelSection as Record<string, unknown>).tts : undefined);
-    const next = nextVoicePick(current);
+  // 【0.6 第 4 步 补二】菜单里直接点某一块（不再只能循环），所以把「写哪一块」抽出来
+  const setVoicePick = (next: VoicePick): { ok: boolean; message?: string } => {
     updateUserConfig((raw) => {
       const applied = applyVoicePick(raw as Record<string, unknown>, next);
       raw.model = applied.model as typeof raw.model;
@@ -3740,16 +4067,23 @@ export function apply(ctx: any): void {
     return { ok: true, message: `嗓子换成「${voicePickWord(next)}」` };
   };
 
-  const cycleBackend = (capability: 'tts' | 'vision'): { ok: boolean; message?: string } => {
+  const cycleVoicePick = (): { ok: boolean; message?: string } => {
     const found = findPetInstance(readAllConfig(configPaths), 'main');
     const conf = (found?.conf ?? {}) as Record<string, unknown>;
-    const cap = capability === 'tts' ? parseModelConfig(conf.model).tts : parseModelConfig(conf.model).vision;
-    const currentWord: BackendWord = !cap.enabled
-      ? 'off'
-      : cap.backend.kind === 'local'
-        ? 'local'
-        : 'remote';
-    const next = nextBackendWord(currentWord);
+    const modelSection = conf.model;
+    const current = pickOf(
+      conf,
+      modelSection !== null && typeof modelSection === 'object'
+        ? (modelSection as Record<string, unknown>).tts
+        : undefined,
+    );
+    return setVoicePick(nextVoicePick(current));
+  };
+
+  const setBackend = (
+    capability: 'tts' | 'vision',
+    next: BackendWord,
+  ): { ok: boolean; message?: string } => {
     updateUserConfig((raw) => {
       const base = parseModelConfig(raw.model);
       const prev = capability === 'tts' ? base.tts : base.vision;
@@ -3778,6 +4112,14 @@ export function apply(ctx: any): void {
     return { ok: true, message: `${name}切换为${modeWord(next)}` };
   };
 
+  const cycleBackend = (capability: 'tts' | 'vision'): { ok: boolean; message?: string } => {
+    const found = findPetInstance(readAllConfig(configPaths), 'main');
+    const conf = (found?.conf ?? {}) as Record<string, unknown>;
+    const cap = capability === 'tts' ? parseModelConfig(conf.model).tts : parseModelConfig(conf.model).vision;
+    const currentWord: BackendWord = !cap.enabled ? 'off' : cap.backend.kind === 'local' ? 'local' : 'remote';
+    return setBackend(capability, nextBackendWord(currentWord));
+  };
+
   const runPetMenuAction = async (label: string): Promise<void> => {
     const action = parsePetMenuLabel(label);
     if (!action) return;
@@ -3804,7 +4146,7 @@ export function apply(ctx: any): void {
           ok: true,
           message: petStatusText({
             companionRunning: companion !== null && companion.status().running,
-            companionIntervalMs,
+            companionIntervalMs: companionIntervalMs > 0 ? companionIntervalMs : configuredCompanionMs(),
             lyricRunning: lyricAgent !== null,
             vision: word(mc.vision),
             voice: word(mc.tts),
@@ -3857,32 +4199,77 @@ export function apply(ctx: any): void {
         result = startWatch(action.pace);
         break;
       // 陪伴的独立声音开关（哥哥 11-09 晚：不是所有陪伴都要出声）
+      // 【11-20 哥哥 m34789】陪伴的出声项和「说」层是**同一个开关**（voice.speak）：
+      //   两处各存一份的话，关了一个另一个还开着，就又回到"为什么她还在响"的老问题。
       case 'watch-voice-toggle': {
-        const next = !watchSpeakEnabled();
+        const next = !voiceSpeakOn();
         updateUserConfig((raw) => {
           const section =
-            raw.watch !== null && typeof raw.watch === 'object' ? (raw.watch as Record<string, unknown>) : {};
-          raw.watch = { ...section, speak: next };
+            raw.voice !== null && typeof raw.voice === 'object' ? (raw.voice as Record<string, unknown>) : {};
+          raw.voice = { ...section, speak: next };
         });
-        result = { ok: true, message: next ? '陪伴会出声了' : '陪伴安静了（只看不说）' };
+        result = { ok: true, message: next ? '会出声了' : '安静了（只看不说）' };
+        break;
+      }
+      case 'say-toggle': {
+        const next = !voiceSpeakOn();
+        updateUserConfig((raw) => {
+          const section =
+            raw.voice !== null && typeof raw.voice === 'object' ? (raw.voice as Record<string, unknown>) : {};
+          raw.voice = { ...section, speak: next };
+        });
+        result = { ok: true, message: next ? '出声了' : '静音了（只看不说）' };
+        break;
+      }
+      case 'say-volume': {
+        const now = voiceVolume();
+        const next = now <= 30 ? 100 : now - 10;
+        updateUserConfig((raw) => {
+          const section =
+            raw.voice !== null && typeof raw.voice === 'object' ? (raw.voice as Record<string, unknown>) : {};
+          raw.voice = { ...section, volume: next };
+        });
+        result = { ok: true, message: `音量 ${next}` };
         break;
       }
       // 哥哥 11-09 晚：「让我看看笔记和识图的记录」——直接打开 logs\陪伴
       case 'watch-open-log': {
         void mkdir(watchLogDir, { recursive: true })
           .then(() => {
-            spawn('cmd.exe', ['/c', 'start', '', watchLogDir], {
+            spawn('cmd.exe', ['/c', 'start', '', layout.watchShots], {
               detached: true,
               stdio: 'ignore',
               windowsHide: true,
             }).unref();
           })
           .catch(() => {});
-        result = { ok: true, message: '记录在 logs\\陪伴' };
+        result = { ok: true, message: '记录在 shots\\watch' };
         break;
       }
       // 哥哥 11-11 m19041：三个模式（自动检测 / 游戏 / 视频）。写进配置，下一张图就按新规则走，
       // 不用重启、也不用重开陪伴（watchSheet 里每张都现读 watchMode()）。
+      // 【0.6 第 4 步 补 · 哥哥 m33124】取景收成一条：点一下 全屏 → 自动 → 窗口 → 全屏
+      case 'watch-mode-cycle': {
+        const nowMode: WatchMode = ((findPetInstance(readAllConfig(configPaths), 'main')?.conf as Record<string, unknown> | undefined)?.watch as Record<string, unknown> | undefined)?.mode as WatchMode | undefined ?? 'auto';
+        const order: WatchMode[] = ['full', 'auto', 'window'];
+        const nextMode = order[(order.indexOf(nowMode) + 1) % order.length];
+        updateUserConfig((raw) => {
+          const section =
+            raw.watch !== null && typeof raw.watch === 'object' ? (raw.watch as Record<string, unknown>) : {};
+          raw.watch = { ...section, mode: nextMode };
+        });
+        refreshPetMenu();
+        result = {
+          ok: true,
+          message:
+            nextMode === 'auto'
+              ? '取景换成「自动」：跟着最前面的窗口截'
+              : nextMode === 'full'
+                ? '取景换成「全屏」：整块屏幕都算'
+                : '取景换成「窗口」：只截当前那个窗口',
+        };
+        break;
+      }
       case 'watch-mode': {
         updateUserConfig((raw) => {
           const section =
@@ -3913,6 +4300,21 @@ export function apply(ctx: any): void {
         result = { ok: true, message: next ? '联网查资料开了' : '联网查资料关了' };
         break;
       }
+      // 【11-20 体检 ⑦】听常驻开关（写配置 ear.resident；听.py 每次录音前读 /services/asr）
+      // 【0.6 第 4 步】「听：听写模型 · medium」：本机只有一档，点了说明一句，不假装能切
+      case 'asr-model':
+        result = { ok: true, message: '听写模型只有 medium 一档（本机没装别的）' };
+        break;
+      case 'ear-resident-toggle': {
+        const next = !earResident();
+        updateUserConfig((raw) => {
+          const section = raw.ear !== null && typeof raw.ear === 'object' ? (raw.ear as Record<string, unknown>) : {};
+          raw.ear = { ...section, resident: next };
+        });
+        refreshPetMenu();
+        result = { ok: true, message: next ? '耳朵常驻开了（下一句起 6 秒变 3 秒）' : '耳朵常驻关了' };
+        break;
+      }
       case 'watch-stop':
         stopWatch();
         result = { ok: true };
@@ -3936,6 +4338,13 @@ export function apply(ctx: any): void {
         break;
       case 'cycle-vision':
         result = cycleBackend('vision');
+        break;
+      // 【0.6 第 4 步 补二】三级菜单里直接点某一档
+      case 'voice-set':
+        result = setVoicePick(action.pick);
+        break;
+      case 'vision-set':
+        result = setBackend('vision', action.word);
         break;
       case 'lyric-start':
         result = startLyric();
@@ -4067,18 +4476,22 @@ export function apply(ctx: any): void {
     const whisperPet = (whisperFound?.pet ?? {}) as Record<string, unknown>;
     const labels = petMenuLabels({
       companionRunning: running,
-      companionIntervalMs,
+      companionIntervalMs: companionIntervalMs > 0 ? companionIntervalMs : configuredCompanionMs(),
       lyricRunning: lyricAgent !== null,
+      earResident: earResident(),
       // 状态那一层的「嗓子 / 眼睛」要显示当前后端（关/本地/云），读的是同一条 model 配置
       vision: backendWordOf(parseModelConfig(whisperConf.model).vision),
       voice: backendWordOf(parseModelConfig(whisperConf.model).tts),
       // 【汐儿 · 11-17 m26051】嗓子按四块显示（模型直连 / 本地 TTS / Windows / Edge）
       voicePick: pickOf(whisperConf, parseModelConfig(whisperConf.model).tts),
+      // 「说」层：出不出声（全局）+ 当前音量
+      speakEnabled: voiceSpeakOn(),
+      voiceVolume: voiceVolume(),
       // 状态行（一级菜单上那句「陪伴 · 1 分钟 · 看过 3 次」）要的是真实计数：
       // ticks 是陪伴自己看的次数，lookCount 是手动点「看一眼」的次数。
       companionTicks: companion?.status().ticks ?? 0,
       // 看护：状态层那条要显示「开 正常 / 关」，明细层要打 ✓
-      watch: { running: watchRunning(), pace: watchPace, speak: watchSpeakEnabled(), mode: watchMode() },
+      watch: { running: watchRunning(), pace: watchPaceNow(), speak: voiceSpeakOn(), mode: watchMode() },
       lookCount,
       whisperEnabled: whisperPet.whisperEnabled === true,
       // 这里**不能**调 whisperPeriodSec：它在下面才定义（const，TDZ），
@@ -4323,8 +4736,8 @@ export function apply(ctx: any): void {
   // 旧的 `memory.json`（跨天累积的那份）**不再读写**：文件留原地不动，但里面的历史从此不参与上下文——
   // 哥哥要的就是「桌宠不要长期记忆」，历史想留着自己翻文件。
   const memoryStore: MemoryStore = createMemoryStore({ dir: join(userRoot, 'memory') });
-  /** 屏幕流水（11-18 待办第 2 条）：和「说了什么」分家，只做注入、不进对话历史 */
-  const screensDir = join(userRoot, 'memory', 'screens');
+  // 屏幕流水目录 `screensDir` 声明在 apply 开头（同文件「为什么声明在这里」）：
+  // 这边注册的定时器一执行就会用到它，写在这儿会撞 TDZ。
   // 【汐儿 · 11-17 第 4 批】换卷式上下文：卷满了（5000 字）就归档 + 摘要，旧卷不删。
   const sessionStore = createSessionStore({
     dir: join(userRoot, 'memory'),
@@ -4450,14 +4863,19 @@ export function apply(ctx: any): void {
     noteSense(`cards pet +${fresh.length} ${fresh.map((card) => card.text.slice(0, 12)).join(' / ')}`);
   };
 
+  /** 【刚聊过】最多带几条（哥哥 m33631：整卷 3,443 字把人设挤成零头，越聊越像复读机） */
+  const RECENT_TURNS = 12;
+
   /** 这一段的摘要 + 最近几条 + 挑中的卡片，拼成系统提示词末尾的一块 */
   const memoryBlockFor = async (text: string): Promise<string> => {
-    // 【11-18 第 13 条】不传 limit = 整卷（≤5,000 字，换卷时已经卡住），不再只给最近 10 条
-    const [context, cards] = await Promise.all([sessionStore.context(), loadCards()]);
+    // 【11-20 m33631】只带最近 RECENT_TURNS 条 + 摘要：整卷 3,443 字会把 529 字的人设挤成零头，
+    // 她照着旧话复读（「尾巴都打卷了」就是这么来的）。摘要兜住更早的事，条数兜住眼前的连贯。
+    const [context, cards] = await Promise.all([sessionStore.context(RECENT_TURNS), loadCards()]);
     const picked = pickCards(cards, text, cardInjectCount());
     if (picked.length > 0) void saveCards(touchCards(cards, picked, Date.now())).catch(() => {});
     const lines: string[] = [];
-    if (lines.length === 0) lines.push('（下面是背景，不是他现在说的话；知道就行，别照念。）');
+    // 【11-20 m34441】三种毛病一起治：把背景当他刚说的、硬提旧事、记不清还编。
+    if (lines.length === 0) lines.push(MEMORY_USAGE_RULES);
     if (context.summary !== '') lines.push('【上回说到】' + context.summary);
     if (context.turns.length > 0) {
       lines.push(
@@ -4580,7 +4998,7 @@ export function apply(ctx: any): void {
     | { ok: true; text: string; image?: string }
     | {
         ok: false;
-        reason: 'provider-missing' | 'generate-error' | 'unknown-pet' | 'empty-pool';
+        reason: 'provider-missing' | 'generate-error' | 'unknown-pet' | 'empty-pool' | 'mouth-busy';
         message?: string;
       }
   > => {
@@ -4601,6 +5019,12 @@ export function apply(ctx: any): void {
       );
       if (!said) {
         return { ok: false, reason: 'empty-pool', message: '碎碎念池里没有可用的句子' };
+      }
+      // 【汐儿 · 11-20 m30910】碎碎念是 1 级：她正在说话（陪伴 / 一眼看 / 对话）时**整条让位**——
+      // 以前这里无条件 epoch+=1，等于把正在念的那句掐掉，看着就像「陪伴的话被碎碎念挤掉了」。
+      if (speakBusy()) {
+        noteSpeak('reject key=whisper priority=low reason=mouth-busy');
+        return { ok: false, reason: 'mouth-busy', message: '正在说话，碎碎念这次跳过' };
       }
       epoch += 1; // 碎碎念是「立刻说」：推一代，让还在合成中的旧句让位（哥哥 10-31 说的抢气泡）
       writeSayNow(petId, said as unknown as Record<string, unknown>);
@@ -4631,8 +5055,8 @@ export function apply(ctx: any): void {
     withMemoryLock(async () => {
       touchUser();
       // 【汐儿 · 11-17 第 2 批】等级由「听」这里定好交出去，想和嘴都不许改（哥哥批注三）。
-      const heard = makeEvent({ kind: 'heard', source: 'ear', text });
-      noteSense(describeEvent(heard));
+      const heard = earEvent(text);
+      registry.emitSense(heard);
       // 【汐儿 · 11-17 第 4 批】「记住：…」收进长期卡片；听到的话进这一卷
       const remember = parseRemember(text);
       if (remember !== undefined) {
@@ -4679,7 +5103,15 @@ export function apply(ctx: any): void {
       const searchOn = searchEnabled();
       // 聊天不看屏幕笔记（哥哥 11-17 m24834）：只带自己的会话上下文 + 卡片
       // 【汐儿 · 11-17 m26171】说话规矩两处共用（聊天 + 陪伴），以前聊天一条没有 → 像客服
-      const baseSystem = petSystemPrompt(found) + memoryBlock + '\n\n' + STYLE_RULES;
+      const live = await liveContext();
+      const baseSystem =
+        petSystemPrompt(found) +
+        memoryBlock +
+        '\n\n' +
+        STYLE_RULES +
+        '\n\n' +
+        reasonBlock({ kind: 'chat', idleMs: lastIdleMs }) +
+        contextBlock(live.line);
       const system = searchOn ? baseSystem + '\n\n' + SEARCH_TOOL_HINT : baseSystem;
       // 配图：开关关闭 → 空池（指令与解析都不介入，与旧行为逐字一致）；目录链按所属条目取。
       // 张数上限（chatImageLimit，0 = 不限制）：整张清单每条消息都要附，截断后费用上限可控。
@@ -4691,11 +5123,19 @@ export function apply(ctx: any): void {
       const list = await recentMessages();
       // 模型：条目配置的 chatModel 优先（留空 = 不指定）；生成侧失败会回落到当前对话的模型重试一次
       // 【汐儿 · 11-17 第 3 批】每问一次就开一轮「想」：他再开口时，上一轮没算完的自动作废。
+      // 【汐儿 · 11-20 半流式】只预热首句：后面的句子播放时要串在首句后面合成，
+      // 提前跑既白合成一遍、又会两句同时把嗓子堵住（11-15 实测首句等 21.7 秒就是这么来的）。
+      let warmFirstUsed = false;
+      const warmFirstSentence = (line: string): void => {
+        if (warmFirstUsed) return;
+        warmFirstUsed = true;
+        warmSynth(line);
+      };
       const ask = async (sys: string) => {
         const mine = mind.begin('main', heard.level);
         try {
           return usesOwnModel(found.conf)
-            ? await generateChatViaGateway(gatewayFor(found.conf), sys, list, text, pool, undefined, mine.signal)
+            ? await generateChatViaGateway(gatewayFor(found.conf), sys, list, text, pool, undefined, mine.signal, warmFirstSentence)
             : await generateChat(ctx, sys, list, text, pool, configuredModel(found.conf, 'chatModel'));
         } finally {
           mine.end();
@@ -5132,7 +5572,7 @@ export function apply(ctx: any): void {
       if (method !== 'GET') return { kind: 'json', status: 405, obj: { error: 'method not allowed' } };
       const now = new Date();
       const day = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
-      const file = join(userRoot, 'logs', '陪伴', `${day}.jsonl`);
+      const file = join(layout.watchNotes, `${day}.jsonl`);
       try {
         // 只读尾部 20 行：陪伴开一整天，当天的 jsonl 可以很长，没必要整份进内存。
         const lines = await readTailLines(file, 20);
@@ -5236,7 +5676,8 @@ export function apply(ctx: any): void {
       if (method !== 'GET') return { kind: 'json', status: 405, obj: { error: 'method not allowed' } };
       const petId = String(url.searchParams.get('pet') ?? 'main');
       const found = findPetInstance(readAllConfig(configPaths), petId);
-      const config = parseModelConfig(found?.conf.model);
+      // 状态卡要报"实际能不能用"：补全后的配置才算数（11-20）
+      const config = fillCloudBackend(parseModelConfig(found?.conf.model));
       const gateway = createModelGateway({ readConfig: () => config, session: sessionChat , extraHeaders: backendHeaders });
       return {
         kind: 'json',
@@ -5278,13 +5719,38 @@ export function apply(ctx: any): void {
     // 哥哥 m00766 定的三条：DSH（或别家程序）要能「让桌宠冒一句话」「让她念出声」「借她的眼睛看图」。
     // 同一份实现住在 core/create-pet-services：进程内走 ctx.get('petApi7340').services，
     // 跨进程走这里 —— 两条入口一份语义，连失败原因都是同一句中文（不各写一套）。
+    // 【汐儿 · 11-20 0.6 第 1 步】听.py 问：「这一句要不要走常驻的耳朵？」
+    // 常驻 = 用户自己开的（ear.resident）或者陪伴正开着（跟陪伴同开同关，哥哥 m31061）。
+    if (rest === 'services/asr') {
+      if (method !== 'GET') return { kind: 'json', status: 405, obj: { error: 'method not allowed' } };
+      const petId = String(url.searchParams.get('pet') ?? 'main');
+      // 读不到配置（源码形态 / 安装损坏）就当「没开」，别把听.py 卡在 500 上：
+      // 这条路由是内部小问询，退化成老路（每句重起）也不会出错。
+      let manual = false;
+      try {
+        const found = findPetInstance(readAllConfig(configPaths), petId);
+        const earConf = found ? ((found.conf as Record<string, unknown>).ear as Record<string, unknown> | undefined) : undefined;
+        manual = earConf?.resident === true;
+      } catch {
+        manual = false;
+      }
+      const watch = watchRunning();
+      return {
+        kind: 'json',
+        status: 200,
+        obj: { ok: true, resident: manual || watch, manual, watch },
+        headers: { 'cache-control': 'no-cache, no-store' },
+      };
+    }
+
     if (rest === 'services/snapshot' || rest === 'services/bubble' || rest === 'services/voice' || rest === 'services/eyes') {
       const petId = String(url.searchParams.get('pet') ?? 'main');
       const found = findPetInstance(readAllConfig(configPaths), petId);
       if (!found) return { kind: 'json', status: 404, obj: { error: `unknown pet: ${petId}` } };
       const conf = found.conf as Record<string, unknown>;
       // 每次请求按当前配置造网关：设置页改完立刻生效，不用重启
-      const modelConfig = parseModelConfig(conf.model);
+      // 11-20：留空跟随 AI 设置 → 这里也要补，否则「试一下」说没配好、主聊天却好好的
+      const modelConfig = fillCloudBackend(parseModelConfig(conf.model));
       const services = createPetServices({
         core,
         gateway: createModelGateway({ readConfig: () => modelConfig, session: sessionChat , extraHeaders: backendHeaders }),
@@ -5510,16 +5976,11 @@ export function apply(ctx: any): void {
       if (!source) return { kind: 'json', status: 400, obj: { ok: false, error: 'text 必填' } };
       // 【本鱼 · 11-01】摘要调试：哥哥报「只总结前半段」，先把送进来的原文长度和首尾记下来，
       // 好分清是上游把文本截了、还是模型自己只看了开头。
-      try {
-        const dir = join(userRoot, 'logs');
-        mkdirSync(dir, { recursive: true });
-        appendFileSync(
-          join(dir, 'summarize.log'),
-          `${new Date().toISOString()} chars=${source.length} head=${source.slice(0, 120).replace(/\s+/g, ' ')} | tail=${source.slice(-120).replace(/\s+/g, ' ')}\n`,
-        );
-      } catch {
-        /* 日志不影响摘要 */
-      }
+      noteLog(
+        'mind.log',
+        'summarize',
+        `chars=${source.length} head=${source.slice(0, 120).replace(/\s+/g, ' ')} | tail=${source.slice(-120).replace(/\s+/g, ' ')}`,
+      );
       const maxChars = Math.min(120, Math.max(20, Number(parsedSum.maxChars) || 60));
       // 【汐儿 · 11-03】提速一：短文本不值得走一次模型往返（实测 0.6~2.8s），按句切一下就能用，
       // 也更忠于原文（模型面对一两句常会改写语气）。阈值取 maxChars*2：这正是摘要的目标长度。
@@ -5546,23 +6007,9 @@ export function apply(ctx: any): void {
       if (!found) return { kind: 'json', status: 404, obj: { error: `unknown pet: ${petId}` } };
       // 对话后端可能选了「会话」——摘要不能走会话（那会把 DSH 又叫一遍、无递归尽头），
       // 所以这里只认自己的远端/本地模型；云端地址与 key 照旧从 AI 设置补。
-      const conn = (ctx.standaloneAi as { connection?: () => { baseUrl: string; apiKey: string } } | undefined)?.connection?.();
-      const modelConfig = parseModelConfig(found.conf.model);
-      const chatBackend = modelConfig.chat.backend;
-      const summarizeConfig =
-        chatBackend.kind === 'remote'
-          ? {
-              ...modelConfig,
-              chat: {
-                ...modelConfig.chat,
-                backend: {
-                  ...chatBackend,
-                  baseUrl: chatBackend.baseUrl || conn?.baseUrl || '',
-                  apiKey: chatBackend.apiKey || conn?.apiKey || '',
-                },
-              },
-            }
-          : modelConfig;
+      // 11-20：地址、模型名、密钥交给同一个补全口（原来只补前两个，模型名空着就报
+      // 「还没填模型名」）。chat 选了「会话」时它原样返回 —— 摘要不能走会话（会把 DSH 又叫一遍）。
+      const summarizeConfig = fillRemoteBackends(parseModelConfig(found.conf.model), standaloneConn());
       // 【汐儿 · 11-03】哥哥说摘要「有点笨」：旧提示词还是书面语，模型会照抄
       // 「2807ms」「/say-loud」「src/host/...」这类念不出来也听不懂的东西，
       // 还常把最亮的数字丢掉（实测 381 字那条，「2807ms → 37ms」整段没被选上）。
@@ -6717,6 +7164,12 @@ export function apply(ctx: any): void {
     method: string,
     body?: string,
   ): Promise<RouteResult | undefined> => {
+    // describe：接线表自述（有哪些输入 / 想 / 输出），给排查与外部工具看
+    if (rest === 'describe') {
+      return method === 'GET'
+        ? { kind: 'json', status: 200, obj: { ok: true, data: registry.describe() } }
+        : { kind: 'json', status: 405, obj: { ok: false, error: 'method not allowed' } };
+    }
     if (rest === 'state') return method === 'GET' ? v1Forward('state', 'GET') : { kind: 'json', status: 405, obj: { ok: false, error: 'method not allowed' } };
     if (rest === 'config') return method === 'GET' || method === 'POST' ? v1Forward('config', method, body) : { kind: 'json', status: 405, obj: { ok: false, error: 'method not allowed' } };
     if (rest === 'say') return method === 'POST' ? v1Forward('say', 'POST', body) : { kind: 'json', status: 405, obj: { ok: false, error: 'method not allowed' } };
@@ -6751,8 +7204,11 @@ export function apply(ctx: any): void {
           const onClose = (): void => abort.abort();
           res.on('close', onClose);
           try {
-            // `/v1/events`：SSE 事件流（每 1 秒推一次变化的 state，15 秒一个心跳注释行）
-            if ((req.url ?? '').split('?')[0] === '/v1/events') {
+            // SSE 事件流（每 1 秒推一次变化的 state，15 秒一个心跳注释行）。
+            // 【11-19】桌面壳也改吃这条：`/dsh-pet-7340/events` 与 `/state` 暴露面完全一样
+            // （都是公开读），所以不用令牌；`/v1/events` 仍是要令牌的对外门面。
+            const ssePath = (req.url ?? '').split('?')[0];
+            if (ssePath === '/v1/events' || ssePath === `${ROUTE_PREFIX}/events`) {
               res.writeHead(200, {
                 'content-type': 'text/event-stream; charset=utf-8',
                 'cache-control': 'no-store',
@@ -6771,19 +7227,29 @@ export function apply(ctx: any): void {
                 const obj = state.obj as { pets?: Record<string, unknown> };
                 // 明细事件：谁在说、说了什么；副气泡有哪些行。state 只推「有变化」的那一份摘要。
                 const pets = obj.pets ?? {};
+                // 【11-20 m31853】状态叶子是 `{counter, data}` 信封：明细要读 `data`，
+                // 直接读 `pet.say.text` 永远是 undefined（say 事件永远是空文本、hint 永远是空数组）。
+                const leafData = (leaf: unknown): Record<string, unknown> => {
+                  if (leaf === null || typeof leaf !== 'object') return {};
+                  const box = leaf as { data?: unknown };
+                  const inner = box.data;
+                  if (inner !== null && typeof inner === 'object') return inner as Record<string, unknown>;
+                  return leaf as Record<string, unknown>;
+                };
                 for (const [petId, rawPet] of Object.entries(pets)) {
                   if (rawPet === null || typeof rawPet !== 'object') continue;
-                  const pet = rawPet as { say?: Record<string, unknown>; hint?: { items?: unknown } };
-                  const said = pet.say ?? {};
+                  const pet = rawPet as { say?: unknown; hint?: unknown };
+                  const said = leafData(pet.say);
                   const sayKey = JSON.stringify([said.text ?? '', said.image ?? '', said.duration ?? 0]);
                   if (lastSay.get(petId) !== sayKey) {
                     lastSay.set(petId, sayKey);
                     emit('say', JSON.stringify({ pet: petId, text: said.text ?? '', image: said.image, duration: said.duration }));
                   }
-                  const hintKey = JSON.stringify(pet.hint?.items ?? []);
+                  const hintItems = leafData(pet.hint).items ?? [];
+                  const hintKey = JSON.stringify(hintItems);
                   if (lastHint.get(petId) !== hintKey) {
                     lastHint.set(petId, hintKey);
-                    emit('hint', JSON.stringify({ pet: petId, items: pet.hint?.items ?? [] }));
+                    emit('hint', JSON.stringify({ pet: petId, items: hintItems }));
                   }
                 }
                 const text = JSON.stringify(state.obj);
@@ -6791,9 +7257,16 @@ export function apply(ctx: any): void {
                 last = text;
                 emit('state', text);
               };
-              void push();
+              const safePush = (why: string): void => {
+                void push().catch((error: unknown) => {
+                  noteBubble(
+                    `sse-push-fail why=${why} ${error instanceof Error ? error.message : String(error)}`,
+                  );
+                });
+              };
+              safePush('open');
               const tick = setInterval(() => {
-                void push();
+                safePush('tick');
               }, 1_000);
               tick.unref?.();
               const beat = setInterval(() => {

@@ -20,7 +20,9 @@
 import { spawn, type ChildProcess } from 'node:child_process';
 
 import { cropFrame } from './screen-crop';
+import { captureJpeg } from './capture';
 import { ddaInput, ddaVf, fitInside } from './capture-source';
+import { hasDdagrab, resolvedFfmpeg } from './capture';
 
 /** 采集尺寸：宽高都是 42 的倍数（DeepSeek 的视觉 patch 是 42px 一格，对齐了不浪费 token） */
 // 【11-09 晚 m16589】哥哥：「截的图只有屏幕左上四分之一」「分辨率太低」。
@@ -41,8 +43,8 @@ const FFMPEG_TIMEOUT_MS = 15_000;
  * 从 1280×800 降到 1024×640：识图快一点、token 少三成，字还认得清。
  * 宽高都是 42 的倍数（DeepSeek 视觉 patch 是 42px 一格），对齐了不浪费。
  */
-export const STILL_W = 1008;
-export const STILL_H = 630;
+export const STILL_W = 1536;
+export const STILL_H = 960;
 
 /** 网格打分：64×36，每格取 4 个采样点求平均（同 see-now 的 gridRgb） */
 const SCAN_W = 64;
@@ -180,6 +182,16 @@ export const DEFAULT_TUNING: WatchTuning = {
   paces: WATCH_PACES,
 };
 
+/** 历史上的「默认值」两套都低于清晰度门槛，成对命中就当用户没设过（11-20 体检） */
+const LEGACY_STILL_SIZES: ReadonlyArray<readonly [number, number]> = [
+  [1008, 630],
+  [1280, 800],
+];
+
+function isLegacyStillSize(width: unknown, height: unknown): boolean {
+  return LEGACY_STILL_SIZES.some(([w, h]) => width === w && height === h);
+}
+
 /** 把外部来的（配置里、设置页里）半截数字夹到安全范围，缺项回落默认 */
 export function normalizeTuning(raw?: Partial<WatchTuning> | null): WatchTuning {
   const pick = (value: unknown, fallback: number, lo: number, hi: number): number => {
@@ -201,8 +213,10 @@ export function normalizeTuning(raw?: Partial<WatchTuning> | null): WatchTuning 
     cutMinGapSec: pick(raw?.cutMinGapSec, DEFAULT_TUNING.cutMinGapSec, 0, 60),
     settleFrames: Math.round(pick(raw?.settleFrames, DEFAULT_TUNING.settleFrames, 1, 30)),
     integralLight: pick(raw?.integralLight, DEFAULT_TUNING.integralLight, 0.5, 100),
-    stillWidth: Math.round(pick(raw?.stillWidth, DEFAULT_TUNING.stillWidth, 320, 4096)),
-    stillHeight: Math.round(pick(raw?.stillHeight, DEFAULT_TUNING.stillHeight, 200, 2560)),
+    // 【11-20】1008×630（0.5.0 出厂）和 1280×800（0.5.2 的旧默认）都低于清晰度门槛，
+    // 老配置里存的就是这两个数 → 成对命中就当没设过，跟着新默认走（1536×960）。
+    stillWidth: Math.round(pick(isLegacyStillSize(raw?.stillWidth, raw?.stillHeight) ? undefined : raw?.stillWidth, DEFAULT_TUNING.stillWidth, 320, 4096)),
+    stillHeight: Math.round(pick(isLegacyStillSize(raw?.stillWidth, raw?.stillHeight) ? undefined : raw?.stillHeight, DEFAULT_TUNING.stillHeight, 200, 2560)),
     paces: { calm: pace('calm'), normal: pace('normal'), dense: pace('dense') },
   };
 }
@@ -513,44 +527,14 @@ export function boxDownsample(
 }
 
 /**
- * 临时抓一张「最近那一帧」的整屏 PNG（1280×800）—— 回看细节用（哥哥 m18222）。
- * 她看六宫格看出有事、又看不清具体名字/数字时，拿这张单张大图再问一次。
+ * 临时抓一张「最近那一帧」的整屏 JPEG—— 回看细节用（哥哥 m18222）。
+ * 她看出屏幕上有事、又看不清具体名字/数字时，拿这张单张大图再问一次。
+ *
+ * 【11-19 截屏收口】进程收在 `capture.ts`：超时、收字节、杀进程只有一份实现。
+ * 【11-20 m31592】改出 JPEG：这张图只送识图、不落盘，320KB 比 2MB 传得快五倍。
  */
-export function grabStillPng(ffmpegPath?: string): Promise<Buffer> {
-  return new Promise((resolve, reject) => {
-    const bin = ffmpegPath || 'ffmpeg';
-    const ff = spawn(bin, [
-      '-hide_banner', '-loglevel', 'error',
-      ...ddaInput(), '-frames:v', '1',
-      '-vf', ddaVf(`scale=${CAPTURE_W}:${CAPTURE_H},format=rgb24`),
-      '-f', 'image2pipe', '-c:v', 'png', 'pipe:1',
-    ], { windowsHide: true });
-    const chunks: Buffer[] = [];
-    let err = '';
-    let done = false;
-    /** 收尾只走一次：超时掐死之后 close 还会再来一遍，别重复 settle */
-    const settle = (fn: () => void): void => {
-      if (done) return;
-      done = true;
-      clearTimeout(timer);
-      fn();
-    };
-    const timer = setTimeout(() => {
-      settle(() => {
-        try { ff.kill(); } catch { /* 已经退了 */ }
-        reject(new Error('抓图超时'));
-      });
-    }, FFMPEG_TIMEOUT_MS);
-    ff.stdout.on('data', (chunk: Buffer) => chunks.push(chunk));
-    ff.stderr.on('data', (chunk: Buffer) => { err += String(chunk); });
-    ff.on('error', (error) => settle(() => reject(error)));
-    ff.on('close', (code) => {
-      settle(() => {
-        if (code === 0 && chunks.length > 0) resolve(Buffer.concat(chunks));
-        else reject(new Error(err.trim() || `抓图退出 ${code}`));
-      });
-    });
-  });
+export function grabStill(ffmpegPath?: string): Promise<Buffer> {
+  return captureJpeg({ ...(ffmpegPath === undefined ? {} : { ffmpegPath }) });
 }
 
 // ---------------------------------------------------------------- 引擎
@@ -656,14 +640,15 @@ export function createWatchMode(options: WatchOptions): WatchHandle {
   }
 
   /** gdigrab 的抓取参数：永远整屏（见文件头 11-10 的说明，跟窗口那条路整条删了）。 */
-  function captureArgs(): string[] {
+  function captureArgs(bin: string): string[] {
+    const dda = hasDdagrab(bin);
     return [
       '-hide_banner',
       '-loglevel',
       'error',
-      ...ddaInput(CAPTURE_FPS),
+      ...ddaInput(CAPTURE_FPS, dda),
       '-vf',
-      ddaVf(`scale=${CAPTURE_W}:${CAPTURE_H},fps=${CAPTURE_FPS}`),
+      ddaVf(`scale=${CAPTURE_W}:${CAPTURE_H},fps=${CAPTURE_FPS}`, dda),
       '-pix_fmt',
       'rgb24',
       '-f',
@@ -674,7 +659,7 @@ export function createWatchMode(options: WatchOptions): WatchHandle {
 
   /** 起 ffmpeg（start 与「窗口换了」共用）。返回 false 表示起不来。 */
   function spawnCapture(): boolean {
-    const bin = options.ffmpegPath || 'ffmpeg';
+    const bin = options.ffmpegPath || resolvedFfmpeg();
     const mine = generation;
     // 【汐儿 · 11-16 m24046】自动截图横纹 / 缺块的真凶：抓屏进程重启时没清残留的半帧。
     // 旧流死在半帧上，新流的字节从这个偏移接着拼，**之后每一帧都错位**——
@@ -682,7 +667,7 @@ export function createWatchMode(options: WatchOptions): WatchHandle {
     pending = [];
     pendingLen = 0;
     try {
-      child = spawn(bin, captureArgs(), { stdio: ['ignore', 'pipe', 'pipe'] });
+      child = spawn(bin, captureArgs(bin), { stdio: ['ignore', 'pipe', 'pipe'] });
     } catch (error) {
       log(`[watch] ffmpeg 起不来：${error instanceof Error ? error.message : String(error)}`);
       return false;
@@ -901,25 +886,30 @@ export function createWatchMode(options: WatchOptions): WatchHandle {
       shotAtMs: startedAt + at * 1000,
     };
     const mine = generation;
-    void encodePng(raw, width, height).then((png) => {
+    void encodeJpeg(raw, width, height).then((image) => {
       if (mine !== generation) return;
       delivered = index;
       lastDeliverAt = Date.now();
       log(`[watch] 出图 #${index} ${reason} t=${at.toFixed(2)}s score=${meta.score} ${cropped ? '裁剪' : '整屏'}`);
-      return options.onSheet(png, meta);
+      return options.onSheet(image, meta);
     }).catch((error: unknown) => {
       log(`[watch] 出图失败：${error instanceof Error ? error.message : String(error)}`);
     });
   }
 
-  /** 原始帧 → PNG 字节（交给识图；ffmpeg 编码只要几十毫秒） */
-  function encodePng(raw: Buffer, width: number, height: number): Promise<Buffer> {
+  /**
+   * 原始帧 → JPEG 字节（交给识图；ffmpeg 编码几十毫秒）。
+   * 用 yuvj420p 所以要偶数边：多挂一个 crop 取偶数，省得窗口尺寸是奇数时编码直接报错。
+   */
+  function encodeJpeg(raw: Buffer, width: number, height: number): Promise<Buffer> {
     return new Promise((resolve, reject) => {
-      const bin = options.ffmpegPath || 'ffmpeg';
+      const bin = options.ffmpegPath || resolvedFfmpeg();
       const ff = spawn(bin, [
         '-hide_banner', '-loglevel', 'error',
         '-f', 'rawvideo', '-pix_fmt', 'rgb24', '-s', `${width}x${height}`,
-        '-i', 'pipe:0', '-frames:v', '1', '-f', 'image2pipe', '-c:v', 'png', 'pipe:1',
+        '-i', 'pipe:0', '-frames:v', '1',
+        '-vf', 'crop=trunc(iw/2)*2:trunc(ih/2)*2',
+        '-f', 'image2pipe', '-c:v', 'mjpeg', '-q:v', '4', 'pipe:1',
       ]);
       const chunks: Buffer[] = [];
       let err = '';
@@ -933,7 +923,7 @@ export function createWatchMode(options: WatchOptions): WatchHandle {
       const timer = setTimeout(() => {
         settle(() => {
           try { ff.kill(); } catch { /* 已经退了 */ }
-          reject(new Error('png 编码超时'));
+          reject(new Error('jpeg 编码超时'));
         });
       }, FFMPEG_TIMEOUT_MS);
       ff.stdout.on('data', (chunk: Buffer) => chunks.push(chunk));
@@ -942,7 +932,7 @@ export function createWatchMode(options: WatchOptions): WatchHandle {
       ff.on('close', (code) => {
         settle(() => {
           if (code === 0 && chunks.length > 0) resolve(Buffer.concat(chunks));
-          else reject(new Error(err.trim() || `png 编码退出 ${code}`));
+          else reject(new Error(err.trim() || `jpeg 编码退出 ${code}`));
         });
       });
       ff.stdin.end(raw);

@@ -24,6 +24,7 @@ import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
+import { captureGrayBytes, resolvedFfmpeg } from './capture';
 import { ddaInput, ddaVf } from './capture-source';
 
 /** 缩略图宽度：64 格。旧版一直用这个尺寸，指纹就是 64×36 的灰度字节。 */
@@ -149,49 +150,14 @@ export interface CompanionHandle {
  * `DSH_PET_FFMPEG` 覆盖成别的路径。**测试不要调用它**——一律注入假的 `capture`。
  */
 export function defaultCapture(): Promise<Uint8Array> {
-  const ffmpeg = process.env.DSH_PET_FFMPEG?.trim() || 'D:\\AI\\GPT-SoVITS\\ffmpeg.exe';
-  const args = [
-    '-hide_banner',
-    '-loglevel',
-    'error',
-    ...ddaInput(),
-    '-frames:v',
-    '1',
-    '-vf',
-    ddaVf('scale=64:36,format=gray'),
-    '-f',
-    'rawvideo',
-    '-pix_fmt',
-    'gray',
-    'pipe:1',
-  ];
-
-  return new Promise<Uint8Array>((resolve, reject) => {
-    const child = spawn(ffmpeg, args, { windowsHide: true });
-    const chunks: Buffer[] = [];
-    let stderr = '';
-
-    child.stdout.on('data', (chunk: Buffer) => chunks.push(chunk));
-    child.stderr.on('data', (chunk: Buffer) => {
-      // 只留最后一段给人看；ffmpeg 出错时通常真正的原因在末尾
-      stderr = (stderr + String(chunk)).slice(-400);
-    });
-    child.once('error', (error) => {
-      reject(new Error('起不来 ffmpeg（' + ffmpeg + '）：' + error.message));
-    });
-    child.once('close', (code) => {
-      if (code !== 0) {
-        reject(new Error('ffmpeg 抓屏失败（退出码 ' + code + '）：' + stderr.slice(0, 200)));
-        return;
-      }
-      const out = Buffer.concat(chunks);
-      if (out.length < THUMB_BYTES) {
-        reject(new Error('ffmpeg 只给了 ' + out.length + ' 字节，不够一帧 64×36 灰度'));
-        return;
-      }
-      // 只取第一帧：-frames:v 1 正常就一帧，多出来的（理论上没有）丢掉，保证指纹长度固定
-      resolve(out.subarray(0, THUMB_BYTES));
-    });
+  // 【11-19 截屏收口】抓屏只剩 `capture.ts` 一份实现：这里只管挑 ffmpeg 和校验长度。
+  const ffmpegPath = resolvedFfmpeg();
+  return captureGrayBytes({ ffmpegPath }).then((out) => {
+    if (out.length < THUMB_BYTES) {
+      throw new Error('ffmpeg 只给了 ' + out.length + ' 字节，不够一帧 64×36 灰度');
+    }
+    // 只取第一帧，保证指纹长度固定
+    return new Uint8Array(out.subarray(0, THUMB_BYTES));
   });
 }
 

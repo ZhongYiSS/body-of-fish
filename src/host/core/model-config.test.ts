@@ -4,7 +4,7 @@
 import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { parseCapability, parseModelConfig, toConfigSection } from './model-config.ts';
+import { fillRemoteBackends, parseCapability, parseModelConfig, toConfigSection } from './model-config.ts';
 
 describe('parseModelConfig（默认值）', () => {
   test('整段缺失 → 聊天开且走会话，识图/声音关且本地', () => {
@@ -101,5 +101,54 @@ describe('toConfigSection（回写）', () => {
     assert.equal(section.tts.refAudioPath, 'D:/AI/GPT-SoVITS/_ref.wav');
     assert.equal(section.tts.speedFactor, 1.1);
     assert.equal(section.vision.protocol, undefined);
+  });
+});
+
+describe('fillRemoteBackends（留空 = 跟随 AI 设置）', () => {
+  const conn = { baseUrl: 'https://opencode.ai/inference/go/openai/v1', model: 'deepseek-v4.1-flash', apiKey: 'oc_sk_x' };
+  const blank = parseModelConfig({
+    chat: { enabled: true, kind: 'remote', baseUrl: '', model: '', apiKey: '' },
+    vision: { enabled: true, kind: 'remote', baseUrl: '', model: '', apiKey: '' },
+    tts: { enabled: true, kind: 'remote', baseUrl: '', model: '', apiKey: '' },
+  });
+
+  test('三个能力都补：地址、模型名、密钥', () => {
+    const filled = fillRemoteBackends(blank, conn);
+    for (const cap of [filled.chat, filled.vision, filled.tts]) {
+      assert.equal(cap.backend.kind, 'remote');
+      const b = cap.backend as { baseUrl: string; model: string; apiKey?: string };
+      assert.equal(b.baseUrl, conn.baseUrl);
+      assert.equal(b.model, conn.model);
+      assert.equal(b.apiKey, conn.apiKey);
+    }
+  });
+
+  test('只补空位：显式写了的不动', () => {
+    const own = parseModelConfig({
+      chat: { enabled: true, kind: 'remote', baseUrl: 'https://api.deepseek.com', model: 'deepseek-flash', apiKey: 'sk-own' },
+      // 模型名空着 → 只补模型名，地址和 key 保留
+      vision: { enabled: true, kind: 'remote', baseUrl: 'https://my.vision/v1', model: '', apiKey: 'vk' },
+    });
+    const filled = fillRemoteBackends(own, conn);
+    const chat = filled.chat.backend as { baseUrl: string; model: string; apiKey?: string };
+    assert.equal(chat.baseUrl, 'https://api.deepseek.com');
+    assert.equal(chat.model, 'deepseek-flash');
+    assert.equal(chat.apiKey, 'sk-own');
+    const vision = filled.vision.backend as { baseUrl: string; model: string; apiKey?: string };
+    assert.equal(vision.baseUrl, 'https://my.vision/v1');
+    assert.equal(vision.model, conn.model);
+    assert.equal(vision.apiKey, 'vk');
+  });
+
+  test('session / local 原样返回', () => {
+    const mixed = parseModelConfig({ chat: { enabled: true, kind: 'session' }, tts: { enabled: true, kind: 'local', endpoint: 'http://127.0.0.1:9880' } });
+    const filled = fillRemoteBackends(mixed, conn);
+    assert.deepEqual(filled.chat, mixed.chat);
+    assert.deepEqual(filled.tts, mixed.tts);
+  });
+
+  test('没 AI 设置（conn 空 / baseUrl 空）→ 原样返回，不硬编默认值', () => {
+    assert.deepEqual(fillRemoteBackends(blank, undefined), blank);
+    assert.deepEqual(fillRemoteBackends(blank, { baseUrl: '   ' }), blank);
   });
 });

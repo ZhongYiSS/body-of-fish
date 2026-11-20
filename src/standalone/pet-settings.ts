@@ -95,6 +95,9 @@ const patchSchema = z
     // 碎碎念总开关（实例级，跟 host/config.ts 的 pets[].whisperEnabled 同一个字段）：
     // 独立版现在碎碎念只抽本地池，但"要不要说"仍然是这只宠物自己的开关。
     whisperEnabled: z.boolean().optional(),
+    // 【11-20 体检 ⑦】耳朵常驻（顶层 ear.resident）：开着时 whisper 只加载一次，每句 6 秒 → 3 秒，
+    // 代价是常驻约 1.5G 内存（闲着 10 分钟自己收）。默认关。
+    earResident: z.boolean().optional(),
     // 碎碎念间隔（分钟）：写顶层 eventsRefreshSec.whisper（秒）。右键菜单与这一页改的是
     // **同一个值**——之前独立版还有一份 AI 设置里的 whisperIntervalSec，两处各说各话，
     // 改了菜单不生效（哥哥 11-01 第 4 条「有重复项」的根子就在这），现在统一到这里。
@@ -163,9 +166,13 @@ const patchSchema = z
     visionBaseUrl: urlField(2048).optional(),
     visionApiKey: z.string().trim().max(8192).optional(),
     clearVisionApiKey: z.boolean().optional(),
+    /** 显式清空识图自己的地址（本地地址 + 云端接口地址）：空串本身按「不修改」处理，清空必须走这个开关 */
+    clearVisionAddress: z.boolean().optional(),
     voiceBaseUrl: urlField(2048).optional(),
     voiceApiKey: z.string().trim().max(8192).optional(),
     clearVoiceApiKey: z.boolean().optional(),
+    /** 显式清空嗓子自己的地址（同 clearVisionAddress） */
+    clearVoiceAddress: z.boolean().optional(),
     // 【汐儿 · 11-10 m18312】游戏陪伴：提示词全文可改 + 突变评分/尺寸/开口闸可调。
     // 空串 = 用内置默认（页面上的「恢复默认」就是写空串以外的默认全文，两者都认）。
     watchPrompt: z.string().max(16000).optional(),
@@ -339,6 +346,7 @@ export function viewOf(config: unknown): Record<string, unknown> {
     display: (DISPLAYS as readonly string[]).includes(display) ? display : FALLBACK.display,
     // 开关口径：桌面上现在有没有这只鱼（web/both 的网页端不受影响）
     desktopVisible: display === 'desktop' || display === 'both',
+    earResident: asBool(asDict(root.ear)?.resident, false),
     corner: (CORNERS as readonly string[]).includes(corner) ? corner : FALLBACK.corner,
     marginX: asInt(position?.marginX, FALLBACK.marginX, 0, 4000),
     marginY: asInt(position?.marginY, FALLBACK.marginY, 0, 4000),
@@ -502,6 +510,11 @@ export function applyPatch(config: Dict, patch: PetSettingsPatch): Dict {
     pet.display = patch.desktopVisible ? (current === 'web' || current === 'both' ? 'both' : 'desktop') : current === 'both' ? 'web' : 'none';
   }
   if (patch.whisperEnabled !== undefined) pet.whisperEnabled = patch.whisperEnabled;
+  if (patch.earResident !== undefined) {
+    const ear: Dict = { ...(asDict(next.ear) ?? {}) };
+    ear.resident = patch.earResident;
+    next.ear = ear;
+  }
   // 间隔写顶层 eventsRefreshSec.whisper（秒）：与右键菜单的「碎碎念：N 分钟」同一个字段
   if (patch.whisperIntervalMin !== undefined) {
     const events: Dict = { ...(asDict(next.eventsRefreshSec) ?? {}) };
@@ -579,12 +592,14 @@ export function applyPatch(config: Dict, patch: PetSettingsPatch): Dict {
     'visionBaseUrl',
     'visionApiKey',
     'clearVisionApiKey',
+    'clearVisionAddress',
     'voiceMode',
     'voiceEndpoint',
     'voiceModel',
     'voiceBaseUrl',
     'voiceApiKey',
     'clearVoiceApiKey',
+    'clearVoiceAddress',
     'voiceProtocol',
     'voiceRefAudio',
     'voicePromptText',
@@ -609,6 +624,7 @@ export function applyPatch(config: Dict, patch: PetSettingsPatch): Dict {
       baseUrl: string | undefined,
       apiKey: string | undefined,
       clearKey: boolean | undefined,
+      clearAddress?: boolean,
     ): (typeof current)['vision'] => {
       const kept = keptHeaders(base.backend);
       const nextMode = mode ?? (base.enabled ? (base.backend.kind === 'local' ? 'local' : 'remote') : 'off');
@@ -621,7 +637,8 @@ export function applyPatch(config: Dict, patch: PetSettingsPatch): Dict {
         // 空串 = 没填，不是"清掉"：本地后端没有地址就是哑的（11-16 声音丢失事故）
         const fallbackPoint = backend.kind === 'local' ? backend.endpoint : '';
         const typed = endpoint !== undefined ? endpoint.trim() : undefined;
-        const point = typed !== undefined && typed !== '' ? typed : fallbackPoint;
+        // 11-19 哥哥：「地址要能清」——空串默认仍按「不修改」，只有显式 clearAddress 才真清
+        const point = clearAddress === true ? '' : typed !== undefined && typed !== '' ? typed : fallbackPoint;
         const name = model !== undefined ? model : backend.kind === 'session' ? '' : (backend.model ?? '');
         return {
           enabled: true,
@@ -647,7 +664,8 @@ export function applyPatch(config: Dict, patch: PetSettingsPatch): Dict {
             ? ''
             : (backend.model ?? '');
       const typedUrl = baseUrl !== undefined ? baseUrl.trim() : undefined;
-      const nextBaseUrl = typedUrl !== undefined && typedUrl !== '' ? typedUrl : (previous?.baseUrl ?? '');
+      const nextBaseUrl =
+        clearAddress === true ? '' : typedUrl !== undefined && typedUrl !== '' ? typedUrl : (previous?.baseUrl ?? '');
       const nextApiKey =
         clearKey === true ? '' : apiKey !== undefined && apiKey !== '' ? apiKey : (previous?.apiKey ?? '');
       return {
@@ -669,6 +687,7 @@ export function applyPatch(config: Dict, patch: PetSettingsPatch): Dict {
       patch.visionBaseUrl,
       patch.visionApiKey,
       patch.clearVisionApiKey,
+      patch.clearVisionAddress,
     );
     let tts = build(
       withHeaders(current.tts, ttsHeaders),
@@ -678,6 +697,7 @@ export function applyPatch(config: Dict, patch: PetSettingsPatch): Dict {
       patch.voiceBaseUrl,
       patch.voiceApiKey,
       patch.clearVoiceApiKey,
+      patch.clearVoiceAddress,
     );
     // 发声协议只挂在 tts 上；切回 openai 时把 sovits 专有字段一并丢掉（配置文件别留幽灵字段）。
     // 不论这次有没有显式传协议，都要把旧协议带过来——否则一次普通保存就会把 protocol 抹掉，
@@ -814,6 +834,7 @@ export function applyPatch(config: Dict, patch: PetSettingsPatch): Dict {
       patch.voiceBaseUrl,
       patch.voiceApiKey,
       patch.clearVoiceApiKey,
+      patch.clearVoiceAddress,
       patch.voiceProtocol,
       patch.voiceRefAudio,
       patch.voicePromptText,

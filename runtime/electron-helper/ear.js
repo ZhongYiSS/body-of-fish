@@ -300,7 +300,8 @@ async function peek() {
   appendEvent('peek', '');
   // 11-09 晚：一级分支标题带状态（`看一眼 · 开 2 分钟：现在看一眼`），标签不再是常量，
   // 先从 /state 的菜单快照里找那一项的真实标签；找不到（宿主还没刷新）再用旧常量兜一次。
-  let label = '看一眼：现在看一眼';
+  // 【0.6 第 4 步】一眼看整组搬进「看」层，默认标签跟着改；还是先从 /state 找真实标签
+  let label = '看：常驻 · 现在看一眼';
   try {
     const res = await fetch(petBase() + '/state', {
       headers: process.env.DSH_PET_API_TOKEN ? { 'x-dsh-pet-token': process.env.DSH_PET_API_TOKEN } : {},

@@ -1235,3 +1235,15 @@ test('排队过期与句子间隔：voice.staleSec / voice.gapMs 过白名单，
   const junk = readAllConfig(withBase({}, { voice: { staleSec: 'fast', gapMs: null } }));
   assert.equal(junk.main.voice, undefined);
 });
+
+describe('readAllConfig —— 耳朵常驻 ear.resident（0.6 第 1 步白名单）', () => {
+  test('用户层写了 true → 读得到（否则被 mergeEntry 静默丢掉）', () => {
+    const merged = readAllConfig(withBase({}, { ear: { resident: true } }));
+    assert.equal((merged.main.ear as Record<string, unknown> | undefined)?.resident, true);
+  });
+
+  test('用户层写非布尔 → 忽略，不凭空造段', () => {
+    const merged = readAllConfig(withBase({}, { ear: { resident: 'yes' } }));
+    assert.equal(merged.main.ear, undefined, '非法值不能带出 ear 段');
+  });
+});

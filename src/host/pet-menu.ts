@@ -34,6 +34,12 @@ export const STATE_PREFIX = '状态：';
 export const COMPANION_PREFIX = '看一眼：';
 /** 分组前缀：碎碎念那一层 */
 export const WHISPER_PREFIX = '碎碎念：';
+/** 【0.6 第 4 步】「看」层：取景三档 + 看图模型 + 一眼看（原「取景」与「看一眼」合并） */
+export const LOOK_PREFIX = '看：';
+/** 【0.6 第 4 步】「听」层：耳朵常驻 + 听写模型 + 歌词（原「状态」里那三条搬过来） */
+export const HEAR_PREFIX = '听：';
+/** 「说」层（11-20 哥哥 m34789）：出不出声 / 怎么出声 / 音量 / 试一句 */
+export const SAY_PREFIX = '说：';
 
 /** 分组前缀：陪伴（看护）那一层（本鱼 · 11-09：常驻看屏幕、只在真的变了时出图）。
  *  11-09 哥哥改名：这一层挪上来叫「陪伴」，原来那个定时截一张的改叫「看一眼」。 */
@@ -80,12 +86,18 @@ export interface PetMenuState {
   lyricRunning: boolean;
   /** 联网查资料的总开关（默认开；只有显式关才是 false） */
   searchEnabled?: boolean;
+  /** 耳朵常驻（whisper 模型只加载一次）：配置里的 ear.resident；undefined = 没设（默认关） */
+  earResident?: boolean;
   /** 看图当前后端（眼睛那一项要显示 关/本地/云） */
   vision?: BackendWord;
   /** 声音当前后端（老的「关/本地/云」；11-17 起嗓子按四块显示，保留兼容） */
   voice?: BackendWord;
   /** 嗓子当前用哪块（模型直连 / 本地 TTS / Windows / Edge，哥哥 m26051） */
   voicePick?: VoicePick;
+  /** 全局「出不出声」（`voice.speak`；undefined = 没设，当开） */
+  speakEnabled?: boolean;
+  /** 音量 0~100（「说」层的音量项要显示当前值） */
+  voiceVolume?: number;
   /** 陪伴已经看过几眼（本次开启以来累计） */
   companionTicks?: number;
   /** 「看一眼」手动点过几次（进程内累计） */
@@ -187,9 +199,9 @@ export function watchPaceWord(pace: WatchPace | undefined): string {
  * 注册语义是「整体覆盖」，所以每次都要给全量：菜单项 = 当下的真实能力清单，
  * 不留下已经停掉却还挂着的僵尸项。
  *
- * 「看一眼：现在看一眼」必须注册：桌面壳的右键根菜单由 `sprite.js` 自己拼一条
- * （11-09 晚起发的是 `看一眼：现在看一眼`；更早是 `陪伴：看一眼`），宿主没注册这一项的话
- * 点了就是 delivered:false —— 点了没反应。
+ * 「看：常驻 · 现在看一眼」必须注册：桌面壳的右键根菜单由 `sprite.js` 自己摆位
+ * （0.6 第 4 步起是 `看：常驻 · 现在看一眼`；更早是 `看一眼：现在看一眼` / `陪伴：看一眼`），
+ * 宿主没注册这一项的话点了就是 delivered:false —— 点了没反应。
  */
 export function petMenuLabels(state: PetMenuState): string[] {
   const companion = state.companionRunning ? `开 ${shortTier(state.companionIntervalMs)}` : '关';
@@ -198,9 +210,7 @@ export function petMenuLabels(state: PetMenuState): string[] {
     // 【11-09 晚 哥哥 m16044】「陪伴 / 看一眼」的开关挪进各自的一级分支，
     //   一级分支标题直接写状态（壳按第一个全角冒号切，冒号前那段就是一级文字），
     //   这样不开状态层就能看见开没开、点一下就能开关。
-    `${STATE_PREFIX}嗓子 · ${state.voicePick === undefined ? modeWord(state.voice) : voicePickWord(state.voicePick)}`,
-    `${STATE_PREFIX}眼睛 · ${modeWord(state.vision)}`,
-    `${STATE_PREFIX}歌词 · ${state.lyricRunning ? '开' : '关'}`,
+    // 【0.6 第 4 步 补】嗓子也搬走（进「听」层）——状态层只剩联网查与接入。
     // 【汐儿 · 11-11 m20199】联网查资料：哥哥说放状态子菜单里、默认开
     `${STATE_PREFIX}联网查 · ${state.searchEnabled === false ? '关' : '开'}`,
     // 接入 DSH（哥哥 11-01：状态层里要有一个「把桌宠接到 DSH」的开关）；
@@ -223,32 +233,61 @@ export function petMenuLabels(state: PetMenuState): string[] {
         ]
       : []),
   ];
-  // 一眼那一层（哥哥 11-09 晚：时长只要「自定义时间」，不再列 1/2/3/5 分钟）
-  // 11-09 晚 m16044：分支标题带状态，开关就在分支里（第一项），不用再进状态层。
-  // 11-09 晚 m16273：关着的时候一级也要能看见「配的多久看一次」，
-  //   不然一级只写「关」，得进去才知道自己设的是 2 分钟还是 30 秒。
+  // 【0.6 第 4 步 补二 · 哥哥 m33196】看 / 听 都是三层：
+  //   一级标题带状态（一眼看开没开 / 耳朵常驻开没开），二级是分组，三级才是具体选项。
+  //   壳的菜单树改成按冒号递归（shared-core.js 的 buildPetMenuTree），三级才摆得开。
+  const watchModeNow: WatchMode = state.watch?.mode ?? 'auto';
   const lookTier = shortTier(state.companionIntervalMs);
-  const lookHead = state.companionRunning
-    ? `看一眼 · 开 ${lookTier}`
+  const lookHead = `${LOOK_PREFIX.slice(0, -1)} · 一眼看 ${state.companionRunning ? '开' : '关'}`;
+  const lookBranch = `${lookHead}：`;
+  // 取景 / 看图 / 嗓子 都是「分组标题带当前值，点具体那项就直接换成它」
+  labels.push(`${lookBranch}取景 · ✓ ${watchModeWord(watchModeNow)}：全屏`);
+  labels.push(`${lookBranch}取景 · ✓ ${watchModeWord(watchModeNow)}：自动`);
+  labels.push(`${lookBranch}取景 · ✓ ${watchModeWord(watchModeNow)}：窗口`);
+  labels.push(`${lookBranch}看图 · ✓ ${modeWord(state.vision)}：关`);
+  labels.push(`${lookBranch}看图 · ✓ ${modeWord(state.vision)}：本地`);
+  labels.push(`${lookBranch}看图 · ✓ ${modeWord(state.vision)}：云`);
+  // 一眼看单独成组：开关 / 现在看一眼 / 自定义时间（关着也把配的间隔写在标题里）
+  const lookState = state.companionRunning
+    ? `✓ 开着（${lookTier}）`
     : state.companionIntervalMs > 0
-      ? `看一眼 · 关（${lookTier}）`
-      : '看一眼 · 关';
-  labels.push(`${lookHead}：${state.companionRunning ? '✓ 开着（点一下关）' : '开（点一下开）'}`);
-  labels.push(`${lookHead}：现在看一眼`);
-  labels.push(`${lookHead}：自定义时间…`);
+      ? `关（${lookTier}，点一下开）`
+      : '关（点一下开）';
+  labels.push(`${lookBranch}一眼看：${lookState}`);
+  labels.push(`${lookBranch}一眼看：现在看一眼`);
+  labels.push(`${lookBranch}一眼看：自定义时间…`);
+  // 记录目录归「看」：它记的就是按这套取景看到的东西
+  labels.push(`${lookBranch}看记录目录（打开）…`);
+
+  // 【0.6 第 4 步】「听」层：嗓子 + 耳朵常驻 + 听写模型 + 歌词。
+  //   歌词只有开关（lyric-agent 没有间隔参数，不摆点不动的假项）。
+  const hearHead = `${HEAR_PREFIX.slice(0, -1)} · 耳朵常驻 ${state.earResident === true ? '开' : '关'}`;
+  const hearBranch = `${hearHead}：`;
+  const voiceNow = state.voicePick === undefined ? modeWord(state.voice) : voicePickWord(state.voicePick);
+  labels.push(
+    `${hearBranch}耳朵常驻 ${state.earResident === true ? '✓ 开（点一下关）' : '关（点一下开）'}`,
+  );
+  labels.push(`${hearBranch}听写模型 · medium`);
+  labels.push(`${hearBranch}歌词 ${state.lyricRunning ? '✓ 开（点一下关）' : '关（点一下开）'}`);
+
+  // 【11-20 哥哥 m34789】「说」层：出不出声 / 怎么出声 / 音量 / 试一句。
+  //   原来只有陪伴有出声开关，哥哥说「统一成声音开关」——这里就是那唯一一个闸，
+  //   陪伴、聊天、一眼看、说一句、碎碎念、桥 /say-loud 全走它。
+  const sayOn = state.speakEnabled !== false;
+  const sayHead = `${SAY_PREFIX.slice(0, -1)} · ${sayOn ? '出声' : '静音'}`;
+  const sayBranch = `${sayHead}：`;
+  labels.push(`${sayBranch}${sayOn ? '✓ 出声（点一下静音）' : '静音（点一下出声）'}`);
+  labels.push(`${sayBranch}嗓子 · ✓ ${voiceNow}：模型直连`);
+  labels.push(`${sayBranch}嗓子 · ✓ ${voiceNow}：本地 TTS`);
+  labels.push(`${sayBranch}嗓子 · ✓ ${voiceNow}：Windows`);
+  labels.push(`${sayBranch}嗓子 · ✓ ${voiceNow}：Edge`);
+  labels.push(`${sayBranch}音量 ${state.voiceVolume ?? 90}（点一下小一点）`);
+  labels.push(`${sayBranch}试一句`);
   // 陪伴那一层（11-09）：三档节奏 + 出声 + 开关（标题带状态，开关在分支第一项）。
   // 同上：关着也要看见当前档位（哥哥 11-09 晚 m16273）
   // 【汐儿 · 11-11 m19216】哥哥要的头是「陪伴 · 游戏/视频 · 开/关（正常/密）」——
   //   模式和档位都摆到一级，一眼就知道她在按哪套规则盯、现在开没开。
-  const watchModeNow: WatchMode = state.watch?.mode ?? 'auto';
-  // 【汐儿 · 11-17 m25895 A 方案】取景三档提到一级：一眼看与陪伴都受它控制。
-  //   陪伴标题因此不再重复模式词（原来「陪伴 · 自动 · 开（正常）」，现在「陪伴 · 开（正常）」）。
-  for (const mode of WATCH_MODES) {
-    const mark = watchModeNow === mode ? '✓ ' : '';
-    labels.push(`取景：${mark}${watchModeWord(mode)}`);
-  }
-  // 「看他看到的（记录目录）…」也归到取景这一层：它记录的就是按这套取景看到的东西
-  labels.push('取景：看他看到的（记录目录）…');
+  // 【0.6 第 4 步】取景三档与记录目录已经并入「看」层（见上），这里不再重复。
   const watchHead = state.watch
     ? `陪伴 · ${state.watch.running ? '开' : '关'}（${watchPaceWord(state.watch.pace)}）`
     : '陪伴 · 关';
@@ -258,7 +297,8 @@ export function petMenuLabels(state: PetMenuState): string[] {
     // 11-09 晚：哥哥说「轻/正常/密」看不出账单，标签里带上每分钟最多几张
     labels.push(`${watchHead}：${active ? '✓ ' : ''}${watchPaceWord(pace)}（${watchPaceCost(pace)}）`);
   }
-  const watchSpeak = state.watch?.speak === true;
+  // 【11-20 哥哥 m34789】统一成一个声音开关：先说层（voice.speak），陪伴这一项读写同一份。
+  const watchSpeak = state.speakEnabled !== false;
   // 11-09 晚 m16399：哥哥点了「出声（点一下开）」反而关掉声音——旧文案像「点一下打开」，
   //   实际是开关。改成把当前状态和点下去的结果都写清楚。
   labels.push(`${watchHead}：${watchSpeak ? '✓ 会出声（点一下静音）' : '不出声（点一下开）'}`);
@@ -293,6 +333,9 @@ export type PetMenuAction =
   | { readonly kind: 'lyric-toggle' }
   /** 状态层第四项：联网查资料（默认开，哥哥 11-11 m20199 放状态子菜单） */
   | { readonly kind: 'search-toggle' }
+  | { readonly kind: 'ear-resident-toggle' }
+  /** 【0.6 第 4 步】「听：听写模型 · medium」：本机只有 medium 一档，点了给一句说明 */
+  | { readonly kind: 'asr-model' }
   | { readonly kind: 'cycle-vision' }
   | { readonly kind: 'cycle-voice' }
   | { readonly kind: 'whisper-enable' }
@@ -310,8 +353,18 @@ export type PetMenuAction =
   | { readonly kind: 'watch-voice-toggle' }
   /** 三个模式：自动检测 / 游戏 / 视频（哥哥 11-11 m19041） */
   | { readonly kind: 'watch-mode'; readonly mode: WatchMode }
+  /** 【0.6 第 4 步 补二】直接选嗓子那块（模型直连 / 本地 TTS / Windows / Edge） */
+  | { readonly kind: 'voice-set'; readonly pick: VoicePick }
+  /** 【0.6 第 4 步 补二】直接选看图后端（关 / 本地 / 云） */
+  | { readonly kind: 'vision-set'; readonly word: BackendWord }
+  /** 【0.6 第 4 步 补】取景一条循环：全屏 → 自动 → 窗口 → 全屏 */
+  | { readonly kind: 'watch-mode-cycle' }
   /** 打开陪伴现场记录（jsonl + 拼图），哥哥 11-09 晚要看「她到底看了什么」 */
-  | { readonly kind: 'watch-open-log' };
+  | { readonly kind: 'watch-open-log' }
+  /** 【11-20 m34789】「说」层：出不出声（全局 voice.speak） */
+  | { readonly kind: 'say-toggle' }
+  /** 【11-20 m34789】「说」层：音量小一档（100→90→…→30→100） */
+  | { readonly kind: 'say-volume' };
 
 /** `看一眼：✓ 开 1 分钟` / `看一眼：开 1 分钟`（旧的 `陪伴：开 …` 也认） → 档位毫秒数 */
 const COMPANION_START = /^(?:看一眼|陪伴)：(?:✓\s*)?开\s*(.+)$/;
@@ -322,6 +375,8 @@ const STATE_VOICE = /^状态：嗓子\s*·/;
 const STATE_VISION = /^状态：眼睛\s*·/;
 const STATE_LYRIC = /^状态：歌词\s*·/;
 const STATE_SEARCH = /^状态：联网查\s*·/;
+/** `状态：听常驻 · ✓ 开`（体检 ⑦：whisper 常驻的总开关） */
+const STATE_EAR_RESIDENT = /^状态：听常驻\s*·/;
 /** `状态：接入 · …`（两个空格容忍） */
 const STATE_DSH = /^状态：接入\s*·/;
 /** `状态：陪伴 · 开 正常` / `状态：陪伴 · 关`（11-09 改名：原「看护」） */
@@ -342,12 +397,15 @@ export function parsePetMenuLabel(label: string): PetMenuAction | null {
   // 【汐儿 · 11-10 m17982】这一层改名「游戏陪伴」，解析时统一切回「陪伴」，老标签继续认
   const text = raw
     .replace(/^游戏陪伴\s*·[^：]*：/u, '陪伴：')
-    .replace(/^(看一眼|陪伴)\s*·[^：]*：/u, '$1：');
+    .replace(/^(看一眼|陪伴)\s*·[^：]*：/u, '$1：')
+    // 【0.6 第 4 步 补二】看 / 听 的一级标题也带状态（`看 · 一眼看 开：…`），同样的剥法
+    .replace(/^(看|听|说)\s*·[^：]*：/u, '$1：');
   if (STATE_COMPANION.test(text)) return { kind: 'companion-toggle' };
   if (STATE_VOICE.test(text)) return { kind: 'cycle-voice' };
   if (STATE_VISION.test(text)) return { kind: 'cycle-vision' };
   if (STATE_LYRIC.test(text)) return { kind: 'lyric-toggle' };
   if (STATE_SEARCH.test(text)) return { kind: 'search-toggle' };
+  if (STATE_EAR_RESIDENT.test(text)) return { kind: 'ear-resident-toggle' };
   if (STATE_WATCH.test(text)) return { kind: 'watch-toggle' };
   if (STATE_DSH.test(text)) {
     // 一条开关（`… · 关` / `… · ✓ 开（会话名）`），一条「选会话…」（开网页挑）
@@ -382,7 +440,83 @@ export function parsePetMenuLabel(label: string): PetMenuAction | null {
     return { kind: 'watch-voice-toggle' };
   }
   if (text === '陪伴：看他看到的（记录目录）…') return { kind: 'watch-open-log' };
-  // 【汐儿 · 11-17 m25895 A 方案】一级「取景」层（全屏 / 自动 / 窗口 / 记录目录）
+  // 【11-20 m34789】「说」层：说 · 出声：✓ 出声（点一下静音） / 嗓子 / 音量 / 试一句
+  if (text.startsWith(SAY_PREFIX)) {
+    const [group, pick = ''] = text
+      .slice(SAY_PREFIX.length)
+      .split('：')
+      .map((part) => part.trim());
+    const head = group ?? '';
+    if (head.startsWith('嗓子')) {
+      const word = pick.replace(/^✓\s*/u, '').trim();
+      if (word === '模型直连') return { kind: 'voice-set', pick: 'model' };
+      if (word === '本地 TTS' || word === '本地') return { kind: 'voice-set', pick: 'tts' };
+      if (word === 'Windows') return { kind: 'voice-set', pick: 'windows' };
+      if (word === 'Edge') return { kind: 'voice-set', pick: 'edge' };
+      return { kind: 'cycle-voice' };
+    }
+    if (head.startsWith('音量')) return { kind: 'say-volume' };
+    if (head.startsWith('试一句')) return { kind: 'speak' };
+    if (head.startsWith('✓ 出声') || head.startsWith('出声')) return { kind: 'say-toggle' };
+    if (head.startsWith('静音')) return { kind: 'say-toggle' };
+    return null;
+  }
+  // 【0.6 第 4 步 补二】「看」层三层：`看 · 一眼看 开：取景 · ✓ 自动：全屏`
+  if (text.startsWith(LOOK_PREFIX)) {
+    const [group, pick = ''] = text
+      .slice(LOOK_PREFIX.length)
+      .split('：')
+      .map((part) => part.trim());
+    const head = group ?? '';
+    if (head.startsWith('取景')) {
+      const word = pick.replace(/^✓\s*/u, '').trim();
+      if (word === '全屏') return { kind: 'watch-mode', mode: 'full' };
+      if (word === '自动') return { kind: 'watch-mode', mode: 'auto' };
+      if (word === '窗口') return { kind: 'watch-mode', mode: 'window' };
+      return { kind: 'watch-mode-cycle' };
+    }
+    if (head.startsWith('看图')) {
+      const word = pick.replace(/^✓\s*/u, '').trim();
+      if (word === '关') return { kind: 'vision-set', word: 'off' };
+      if (word === '本地') return { kind: 'vision-set', word: 'local' };
+      if (word === '云') return { kind: 'vision-set', word: 'remote' };
+      return { kind: 'cycle-vision' };
+    }
+    if (head.startsWith('一眼看')) {
+      const tail = pick.replace(/^✓\s*/u, '').trim();
+      if (tail.startsWith('现在看一眼')) return { kind: 'look' };
+      if (tail.startsWith('自定义')) return { kind: 'companion-custom' };
+      if (tail.startsWith('开着')) return { kind: 'companion-stop' };
+      return { kind: 'companion-toggle' };
+    }
+    if (head.startsWith('看记录目录') || head.startsWith('看他看到的')) return { kind: 'watch-open-log' };
+    // 0.6 第 4 步 那一版的两层标签继续认，免得壳还拿着旧标签
+    const rest = head.replace(/^✓\s*/u, '').trim();
+    if (rest.startsWith('取景')) return { kind: 'watch-mode-cycle' };
+    if (rest.startsWith('看图')) return { kind: 'cycle-vision' };
+    return null;
+  }
+  // 【0.6 第 4 步】「听」层三层：`听 · 耳朵常驻 开：嗓子 · ✓ Edge：Edge`
+  if (text.startsWith(HEAR_PREFIX)) {
+    const [group, pick = ''] = text
+      .slice(HEAR_PREFIX.length)
+      .split('：')
+      .map((part) => part.trim());
+    const head = group ?? '';
+    if (head.startsWith('嗓子')) {
+      const word = pick.replace(/^✓\s*/u, '').trim();
+      if (word === '模型直连') return { kind: 'voice-set', pick: 'model' };
+      if (word === '本地 TTS' || word === '本地') return { kind: 'voice-set', pick: 'tts' };
+      if (word === 'Windows') return { kind: 'voice-set', pick: 'windows' };
+      if (word === 'Edge') return { kind: 'voice-set', pick: 'edge' };
+      return { kind: 'cycle-voice' };
+    }
+    if (head.startsWith('耳朵常驻')) return { kind: 'ear-resident-toggle' };
+    if (head.startsWith('听写模型')) return { kind: 'asr-model' };
+    if (head.startsWith('歌词')) return { kind: 'lyric-toggle' };
+    return null;
+  }
+  // 旧版「取景：」还认（壳里可能残留旧标签）
   if (text.startsWith('取景：')) {
     const rest = text.slice('取景：'.length).replace(/^✓\s*/u, '').trim();
     if (rest === '全屏') return { kind: 'watch-mode', mode: 'full' };
@@ -447,13 +581,19 @@ export function petMenuFeedback(
     case 'companion-start':
       return `看一眼开了：每 ${Math.round(action.intervalMs / 1000)} 秒看一次`;
     case 'companion-custom':
-      return '自定义窗口打开了：填分钟数点保存';
+      return '自定义窗口打开了：填秒数点保存';
     case 'companion-stop':
       return '看一眼停了';
     // 开关类：宿主会把「切换成了什么」放进 message（例：嗓子切换为本地）
     case 'companion-toggle':
     case 'lyric-toggle':
     case 'search-toggle':
+    // 体检 ⑦：耳朵常驻开关，宿主会把「开了/关了」放进 message
+    case 'ear-resident-toggle':
+    case 'asr-model':
+    case 'watch-mode-cycle':
+    case 'voice-set':
+    case 'vision-set':
     case 'cycle-vision':
     case 'cycle-voice':
       return result.message ?? '切换好了';
@@ -486,7 +626,11 @@ export function petMenuFeedback(
     case 'watch-toggle':
       return result.message ?? '陪伴切换好了';
     case 'watch-voice-toggle':
-      return result.message ?? '陪伴的声音切换好了';
+      return result.message ?? '声音切换好了';
+    case 'say-toggle':
+      return result.message ?? '声音切换好了';
+    case 'say-volume':
+      return result.message ?? '音量调好了';
     case 'watch-mode':
       return result.message ?? `陪伴换成「${watchModeWord(action.mode)}」模式了`;
     case 'watch-open-log':

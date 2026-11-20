@@ -145,6 +145,41 @@ export function parseModelConfig(raw: unknown): ModelConfig {
   };
 }
 
+/**
+ * 「留空 = 跟随 AI 设置」的**唯一实现处**（11-20 哥哥 m34651 定的 B 案）。
+ *
+ * 为什么要有这一层：地址、模型名、密钥三样散在「AI 设置」和宠物配置两处，
+ * 每个调用点自己补一遍必然出事——11-20 的实况就是 chat 被一份历史快照钉死在
+ * DeepSeek 官方，而识图因为**模型名**没补，直接报「还没填模型名」。
+ *
+ * 口径（和设置页那句「留空 = 沿用对话模型」一字对应）：
+ *  - 只补 remote 后端；session（跟会话走）与 local（本机服务）原样返回。
+ *  - **只补空位**：用户显式写了地址/模型名/密钥，一律以他写的为准。
+ *  - conn 为空或 baseUrl 为空（插件模式、或 AI 设置还没填）→ 原样返回，不硬编默认值。
+ */
+export function fillRemoteBackends(
+  config: ModelConfig,
+  conn: { baseUrl: string; model?: string; apiKey?: string } | undefined,
+): ModelConfig {
+  if (!conn || conn.baseUrl.trim() === '') return config;
+  const one = (cap: CapabilityConfig): CapabilityConfig => {
+    if (cap.backend.kind !== 'remote') return cap;
+    const backend = cap.backend;
+    const model = (conn.model ?? '').trim();
+    const apiKey = (conn.apiKey ?? '').trim();
+    return {
+      ...cap,
+      backend: {
+        ...backend,
+        baseUrl: backend.baseUrl.trim() === '' ? conn.baseUrl : backend.baseUrl,
+        model: backend.model.trim() === '' ? model : backend.model,
+        ...((backend.apiKey ?? '').trim() === '' && apiKey !== '' ? { apiKey } : {}),
+      },
+    };
+  };
+  return { chat: one(config.chat), vision: one(config.vision), tts: one(config.tts) };
+}
+
 /** 写回配置文件时的反向转换（设置页保存用）：只写"和默认不一样"的字段，配置文件别被写脏。 */
 export function toConfigSection(config: ModelConfig): Record<string, Record<string, unknown>> {
   const one = (item: CapabilityConfig, capability: ModelCapability): Record<string, unknown> => {

@@ -54,13 +54,17 @@ export function systemPlayerScript(file: string, mime: string, volume = 100, sto
     '$ErrorActionPreference = "Stop"',
     '$ProgressPreference = "SilentlyContinue"',
     'Add-Type -AssemblyName PresentationCore',
+    // 【11-20 汐儿】WPF MediaPlayer 要靠消息泵推进：只 Start-Sleep 时实测「静着不响」，
+    //   别的软件一出声就跟着响——缺的就是这个泵。DoEvents 用 System.Windows.Forms（.NET 自带）。
+    'Add-Type -AssemblyName System.Windows.Forms',
+    '$pump = { [System.Windows.Forms.Application]::DoEvents() }',
     '$mp = New-Object System.Windows.Media.MediaPlayer',
     `$mp.Open([uri]${quoted})`,
     `$mp.Volume = ${playerVolume(volume)}`,
     // 先开播、再问时长：等 NaturalDuration 有值可能要几百毫秒，不能让她等着它才开始说话
     '$mp.Play()',
     '$t0 = [Environment]::TickCount',
-    'for ($i = 0; $i -lt 60 -and -not $mp.NaturalDuration.HasTimeSpan; $i++) { Start-Sleep -Milliseconds 50 }',
+    'for ($i = 0; $i -lt 60 -and -not $mp.NaturalDuration.HasTimeSpan; $i++) { & $pump; Start-Sleep -Milliseconds 20 }',
     '$ms = if ($mp.NaturalDuration.HasTimeSpan) { [int]$mp.NaturalDuration.TimeSpan.TotalMilliseconds } else { 4000 }',
     // 已经先播掉的那段要扣掉，否则每句都要念长一点
     '$left = [Math]::Max(0, $ms - ([Environment]::TickCount - $t0))',
@@ -71,13 +75,13 @@ export function systemPlayerScript(file: string, mime: string, volume = 100, sto
       // 一边播一边看旗标：40ms 一次，看到就转去淡出
       '$fade = $false',
       '$waited = 0',
-      `while ($waited -lt $left) { if (Test-Path -LiteralPath ${stopQuoted}) { $fade = $true; break } Start-Sleep -Milliseconds 40; $waited += 40 }`,
+      `while ($waited -lt $left) { if (Test-Path -LiteralPath ${stopQuoted}) { $fade = $true; break } & $pump; Start-Sleep -Milliseconds 20; $waited += 20 }`,
       'if ($fade) {',
-      '  for ($k = 10; $k -ge 0; $k--) { $mp.Volume = [double]$k / 10.0; Start-Sleep -Milliseconds 25 }',
+      '  for ($k = 10; $k -ge 0; $k--) { $mp.Volume = [double]$k / 10.0; & $pump; Start-Sleep -Milliseconds 25 }',
       '}',
     );
   } else {
-    lines.push('Start-Sleep -Milliseconds $left');
+    lines.push('while ($left -gt 0) { & $pump; $step = [Math]::Min(20, $left); Start-Sleep -Milliseconds $step; $left = $left - $step }');
   }
   lines.push('$mp.Stop()', '$mp.Close()');
   return lines.join('\n');

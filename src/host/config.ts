@@ -523,6 +523,22 @@ function watchSectionField(own: unknown, label: string): { watch?: Record<string
   return Object.keys(out).length > 0 ? { watch: out } : {};
 }
 
+/**
+ * ear 段：`resident` —— 耳朵常驻（whisper 模型只加载一次，转写从 6 秒降到 3 秒）。
+ * 【汐儿 · 11-20 0.6 第 1 步】哥哥 m31061：默认关、能开，开了陪伴同步打开和关闭。
+ * 所以「算不算常驻」= `ear.resident || 陪伴正在跑`，这条路由 /services/asr 告诉听.py。
+ */
+function earSectionField(own: unknown, label: string): { ear?: Record<string, unknown> } {
+  if (own === null || typeof own !== 'object' || Array.isArray(own)) return {};
+  const src = own as Record<string, unknown>;
+  const out: Record<string, unknown> = {};
+  if (src.resident !== undefined && src.resident !== null) {
+    if (typeof src.resident === 'boolean') out.resident = src.resident;
+    else warnOnce(label + ':ear.resident', '「' + label + '」的 ear.resident 非法，已忽略');
+  }
+  return Object.keys(out).length > 0 ? { ear: out } : {};
+}
+
 /** subtitle 段：只有 sessData 一个键（B站登录信息，看视频抓字幕用）。
  *  【汐儿 · 11-11 m19834】哥哥选「设置页填一次 SESSDATA」。空串 = 没填，抓字幕就老实放弃。 */
 function subtitleSectionField(own: unknown, label: string): { subtitle?: Record<string, unknown> } {
@@ -587,6 +603,8 @@ function voiceSectionField(own: unknown, label: string): { voice?: Record<string
   }
   // 【汐儿 · 11-17 第 5 批（三）】嗓子四块：`voice.pick` 记当前用哪块，
   //   `voice.presets` 记四块各自的字段（切块时先存这边、再套用到 model.tts）。
+  // 【11-20 哥哥 m34789】「说」层的总闸：voice.speak（关掉就只冒气泡不出声）
+  if (typeof src.speak === 'boolean') out.speak = src.speak;
   const picks = ['model', 'tts', 'windows', 'edge'];
   if (typeof src.pick === 'string' && picks.includes(src.pick)) out.pick = src.pick;
   const presets = src.presets;
@@ -695,6 +713,7 @@ function mergeEntry(
     ...hintSectionField(overlay?.hint, label),
     ...contextSectionField(overlay?.context, label),
     ...mouthSectionField(overlay?.mouth, label),
+    ...earSectionField(overlay?.ear, label),
   };
 }
 

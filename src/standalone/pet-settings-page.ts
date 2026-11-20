@@ -89,6 +89,7 @@ export const petSettingsPage = `<!doctype html>
 <label for="visionApiKey">云端 API 密钥 <span id="vision-key-state" class="hint">尚未读取</span></label>
 <input id="visionApiKey" type="password" autocomplete="new-password" maxlength="8192" placeholder="留空保留已保存的密钥">
 <label class="check"><input id="clearVisionApiKey" type="checkbox"> 清除识图自己的密钥（回落对话模型那把）</label>
+<label class="check"><input id="clearVisionAddress" type="checkbox"> 清除识图自己的地址（本地地址 + 云端接口，回落对话模型）</label>
 <p class="hint">本地 = 本机开着的识图服务（LM Studio、ollama 之类）；云端 = 可以单独填地址与密钥，<b>默认跟随对话</b>——地址、模型名、密钥任一项留空，就用「对话模型」那一份。</p>
 <label for="visionHeaders">会话头（每行一条 <code>Key: Value</code>，只对这一项生效；留空 = 不带）</label>
 <textarea id="visionHeaders" rows="3" maxlength="4000" spellcheck="false" placeholder="x-whatever-key: 值"></textarea>
@@ -108,6 +109,7 @@ export const petSettingsPage = `<!doctype html>
 <div class="pair" data-vrow="baseUrl"><label for="voiceBaseUrl">接口地址（留空 = 沿用对话模型）</label><input id="voiceBaseUrl" type="url" maxlength="2048" placeholder="https://example.com/v1" spellcheck="false"></div>
 <div class="pair" data-vrow="apiKey"><label for="voiceApiKey">API 密钥 <span id="voice-key-state" class="hint">尚未读取</span></label><input id="voiceApiKey" type="password" autocomplete="new-password" maxlength="8192" placeholder="留空保留已保存的密钥"></div>
 <div class="pair" data-vrow="apiKey"><label class="check"><input id="clearVoiceApiKey" type="checkbox"> 清除这块自己的密钥（回落对话模型那把）</label></div>
+<div class="pair"><label class="check"><input id="clearVoiceAddress" type="checkbox"> 清除嗓子自己的地址（本地地址 + 接口地址，回落到上面那套默认）</label></div>
 <div class="pair" data-vrow="endpoint"><label for="voiceEndpoint">本地地址</label><input id="voiceEndpoint" type="text" maxlength="512" placeholder="http://127.0.0.1:9880"></div>
 <label for="voiceModel" id="voiceModelLabel">模型名 / 音色</label><input id="voiceModel" type="text" maxlength="200" placeholder="留空用服务端默认">
 <div class="pair" data-vrow="refAudio"><label for="voiceRefAudio">参考音（绝对路径）</label><input id="voiceRefAudio" type="text" maxlength="512" placeholder="D:\\AI\\GPT-SoVITS\\_ref.wav"></div>
@@ -126,6 +128,10 @@ export const petSettingsPage = `<!doctype html>
 <div class="pair"><label for="contextRollChars">换卷字数（800–20000，越小记得越细）</label><input id="contextRollChars" type="number" min="800" max="20000" step="100"></div>
 <div class="pair"><label for="contextCardInject">每次注入几张卡片（1–20）</label><input id="contextCardInject" type="number" min="1" max="20" step="1"></div>
 <div class="pair"><label for="mouthQueueMax">嘴边最多排几条（1–10）</label><input id="mouthQueueMax" type="number" min="1" max="10" step="1"></div>
+<fieldset><legend>耳朵（听写）</legend>
+<label class="check"><input id="earResident" type="checkbox"> 耳朵常驻：whisper 模型只加载一次</label>
+<p class="hint">开着的时候每句听写从 <b>6 秒</b> 降到 <b>3 秒</b>（第一句仍要等模型加载），代价是常驻约 1.5G 内存；闲着 10 分钟会自己收掉。默认关。</p>
+</fieldset>
 <fieldset><legend>全局快捷键</legend>
 <div class="pair"><label for="earHotkey">按住说话</label><input id="earHotkey" type="text" maxlength="32" placeholder="留空 = Alt+T"></div>
 <div class="pair"><label for="peekHotkey">看一眼屏幕</label><input id="peekHotkey" type="text" maxlength="32" placeholder="留空 = Alt+G"></div>
@@ -297,7 +303,7 @@ export const petSettingsScript = `
     'voiceModel', 'voiceRefAudio', 'voicePromptText'];
   const numbers = ['size', 'marginX', 'marginY', 'fontSize', 'gravity', 'restitution', 'groundFriction',
     'throwPower', 'maxTokens'];
-  const flags = ['desktopVisible', 'fixedEnabled', 'confineToScreen', 'followPet', 'ceilingBounce', 'enabled'];
+  const flags = ['desktopVisible', 'fixedEnabled', 'confineToScreen', 'followPet', 'ceilingBounce', 'enabled', 'earResident'];
   // 【汐儿 · 11-17 第 5 批（三）】嗓子四块：页签切换 + 每块各存一份
   var VOICE_PICKS = ['model', 'tts', 'windows', 'edge'];
   var voicePickNow = 'model';
@@ -321,6 +327,7 @@ export const petSettingsScript = `
     get('voiceBaseUrl').value = d.baseUrl || '';
     get('voiceApiKey').value = '';
     get('clearVoiceApiKey').checked = false;
+    get('clearVoiceAddress').checked = false;
   }
   var VOICE_ROWS = { model: ['baseUrl', 'apiKey'], tts: ['endpoint', 'refAudio'], windows: [], edge: [] };
   var VOICE_MODEL_LABEL = {
@@ -383,11 +390,12 @@ export const petSettingsScript = `
       if (state) state.textContent = data['has' + cap[0].toUpperCase() + cap.slice(1) + 'Key'] ? '已保存 · 不回显' : '沿用对话模型';
       const input = get(cap + 'ApiKey'); if (input) input.value = '';
       const clear = get('clear' + cap[0].toUpperCase() + cap.slice(1) + 'ApiKey'); if (clear) clear.checked = false;
+      const clearAddr = get('clear' + cap[0].toUpperCase() + cap.slice(1) + 'Address'); if (clearAddr) clearAddr.checked = false;
     }
     for (const id of ['size', 'marginX', 'marginY', 'fontSize', 'gravity', 'restitution', 'groundFriction', 'throwPower']) {
       const el = get(id); if (el && data[id] !== undefined) el.value = String(data[id]);
     }
-    for (const id of ['desktopVisible', 'fixedEnabled', 'confineToScreen', 'followPet', 'ceilingBounce']) {
+    for (const id of ['desktopVisible', 'fixedEnabled', 'confineToScreen', 'followPet', 'ceilingBounce', 'earResident']) {
       const el = get(id); if (el) el.checked = data[id] === true;
     }
     // 陪伴：四套提示词留空 = 用默认；数字原样回填；默认值留着给「恢复这一栏」
@@ -471,10 +479,11 @@ export const petSettingsScript = `
       hintX: Math.round(hintPos.x), hintY: Math.round(hintPos.y), hintSize: Number(get('hintSize').value),
       gravity: Number(get('gravity').value), restitution: Number(get('restitution').value),
       groundFriction: Number(get('groundFriction').value), throwPower: Number(get('throwPower').value),
-      ceilingBounce: get('ceilingBounce').checked, persona: get('persona').value.trim(),
+      ceilingBounce: get('ceilingBounce').checked, earResident: get('earResident').checked, persona: get('persona').value.trim(),
       visionMode: get('visionMode').value, visionEndpoint: get('visionEndpoint').value.trim(),
       visionModel: get('visionModel').value.trim(), voiceMode: get('voiceMode').value,
       visionBaseUrl: get('visionBaseUrl').value.trim(), clearVisionApiKey: get('clearVisionApiKey').checked,
+      clearVisionAddress: get('clearVisionAddress').checked,
       visionHeaders: get('visionHeaders').value, ttsHeaders: get('ttsHeaders').value,
       voiceProtocol: get('voiceProtocol').value, voiceEndpoint: get('voiceEndpoint').value.trim(),
       voiceModel: get('voiceModel').value.trim(), voiceRefAudio: get('voiceRefAudio').value.trim(),
@@ -486,6 +495,7 @@ export const petSettingsScript = `
       voiceStaleSec: Number(get('voiceStaleSec').value),
       voiceGapMs: Number(get('voiceGapMs').value),
       voiceBaseUrl: get('voiceBaseUrl').value.trim(), clearVoiceApiKey: get('clearVoiceApiKey').checked,
+      clearVoiceAddress: get('clearVoiceAddress').checked,
       // 快捷键：留空 = 用默认（Alt+T / Alt+G / Alt+S），写成空串交给后端删键
       earHotkey: get('earHotkey').value.trim(), peekHotkey: get('peekHotkey').value.trim(),
       sayHotkey: get('sayHotkey').value.trim(),

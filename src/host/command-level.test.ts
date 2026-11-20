@@ -24,7 +24,8 @@ test('noteCommand 发 command 事件，且只掐屏幕想', () => {
   const at = indexCode.indexOf('const noteCommand = (');
   assert.ok(at > 0, '没找到 noteCommand');
   const body = indexCode.slice(at, at + 700);
-  assert.match(body, /makeEvent\(\{ kind: 'command'/u);
+  // 11-19 起 command 事件由 `sources/manual.ts` 产，这里只认「走接线表」这一件事
+  assert.match(body, /registry\.emitSense\(manualEvent\(source, text\)\)/u);
   assert.match(body, /mind\.cancel\('screen'/u);
   assert.ok(!/mind\.cancel\('main'/u.test(body), '手动动作不该掐主聊天');
   assert.ok(!/mind\.cancel\('all'/u.test(body), '手动动作不该掐掉所有');

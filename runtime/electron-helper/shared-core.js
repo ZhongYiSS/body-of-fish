@@ -1040,6 +1040,9 @@ function buildPetMenuTree(items) {
 			});
 			continue;
 		}
+		// 【0.6 第 4 步 补二】三层菜单：`看 · 一眼看 开：取景 · ✓ 自动：窗口`
+		// 第一段是带状态的一级标题，中间段是分组，最后一段才是选项。
+		// 中间的组节点不给动作（点了只是展开/无反应），只有叶子把整条标签回传宿主。
 		const head = parts[0];
 		let branch = branches.get(head);
 		if (!branch) {
@@ -1049,12 +1052,25 @@ function buildPetMenuTree(items) {
 			};
 			branches.set(head, branch);
 		}
-		branch.children.push({
-			label: parts.slice(1).join("："),
-			action: "third-party",
-			owner: COMPANION_OWNER,
-			send: label
-		});
+		let node = branch;
+		for (let i = 1; i < parts.length; i += 1) {
+			const last = i === parts.length - 1;
+			if (last) {
+				node.children.push({
+					label: parts[i],
+					action: "third-party",
+					owner: COMPANION_OWNER,
+					send: label
+				});
+				break;
+			}
+			let next = node.children.find((c) => Array.isArray(c.children) && c.label === parts[i]);
+			if (!next) {
+				next = { label: parts[i], children: [] };
+				node.children.push(next);
+			}
+			node = next;
+		}
 	}
 	return leaves.concat(Array.from(branches.values()));
 }

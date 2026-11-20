@@ -33,7 +33,10 @@ describe('说话规矩：一句 20 字、学会闲聊不复述（哥哥 m26171�
 describe('说话规矩：两处共用，聊天不再没有规矩', () => {
   it('聊天 system 拼上了 STYLE_RULES', () => {
     const src = read('index.ts');
-    assert.match(src, /const baseSystem = petSystemPrompt\(found\) \+ memoryBlock \+ '\\n\\n' \+ STYLE_RULES;/u);
+    // m31144：规矩后面还接「他这会儿」公共块；m33631 又在中间插了「这轮为什么开口」
+    assert.match(src, /const baseSystem =[\s\S]{0,160}petSystemPrompt\(found\)/u);
+    assert.match(src, /memoryBlock[\s\S]{0,160}STYLE_RULES/u);
+    assert.match(src, /STYLE_RULES \+[\s\S]{0,200}contextBlock\(live\.line\)/u);
   });
 
   it('陪伴提示词用 {{style}} 而不是自己再写一套', () => {

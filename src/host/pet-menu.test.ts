@@ -52,28 +52,31 @@ test('标签：前缀只有状态/陪伴/碎碎念，长度与条数都在上限
   });
   for (const label of [...petMenuLabels(idle), ...running]) {
     // 只许这几种前缀：多一种就会在壳里多出一层没人排过的菜单
-    // 11-17 m25895：新增一级「取景」（全屏/自动/窗口/记录目录）
-    assert.match(label, /^(状态|陪伴|看一眼|碎碎念|取景)(\s*·[^：]*)?：/, `前缀不在约定里：${label}`);
-    // 一个标签里只能有一个分组冒号，否则会多套一层
-    assert.equal(label.split('：').length - 1, 1, `多了一个分组冒号会多套一层：${label}`);
+    // 【0.6 第 4 步】一级只剩 状态 / 看 / 听 / 说 / 陪伴 / 碎碎念（取景并入「看」，一眼看也并入「看」）
+    // 【11-20 m34789】新增「说」层：出不出声 / 怎么出声 / 音量 / 试一句
+    assert.match(label, /^(状态|看|听|说|陪伴|碎碎念)(\s*·[^：]*)?：/, `前缀不在约定里：${label}`);
+    // 【0.6 第 4 步 补二】看 / 听 是三层的（`看 · 一眼看 开：取景 · ✓ 自动：全屏`），
+    // 最多两个分组冒号；其它层还是只能一层。
+    const colons = label.split('：').length - 1;
+    const deep = label.startsWith('看 · ') || label.startsWith('听 · ') || label.startsWith('说 · ');
+    assert.ok(colons <= (deep ? 2 : 1), `冒号太多会多套一层：${label}`);
     assert.ok(label.length <= 32, `label 超过 LABEL_MAX=32：${label}`);
   }
   // 壳里 `menu.ts` 的 ITEMS_MAX 是 40；这里卡的是「一眼能翻完」的自家预算。
   // 11-09 晚「菜减量」：档位全部收进自定义小窗，时间不再一项一档 →
   // 状态 4 + 看一眼 3 + 陪伴 5 + 碎碎念 3 = 15 条（关停项只在开着时出现）。
-  assert.ok(running.length <= 20, `单项 owner 最多 20 条，实际 ${running.length} 条`);
+  // 【11-20 体检 ⑦】状态层多了一条「听常驻」（耳朵常驻开关，原来只能改配置文件），
+  // 关态 21 条 / 开态 23 条，仍在「一眼能翻完」的范围里（壳上限 40）。
+  // 【0.6 第 4 步 补二】看层 4+3+3+4=14 条、听层 4+3=7 条（三层菜单后条数变多，壳上限 40）
+  assert.ok(running.length <= 32, `单项 owner 最多 32 条，实际 ${running.length} 条`);
   assert.equal(new Set(running).size, running.length, '同一 owner 内 label 必须唯一');
 });
 
-test('状态二级：顺序是 嗓子/眼睛/歌词/联网查、值跟着真实状态走', () => {
+test('状态二级：只剩 嗓子/联网查/接入（眼睛、歌词、听常驻都搬进「看」「听」）', () => {
   const labels = petMenuLabels(idle);
   const stateItems = labels.filter((label) => label.startsWith(STATE_PREFIX));
   assert.deepEqual(stateItems, [
-    // 11-09 晚 m16044：陪伴 / 看一眼的开关挪进各自的一级分支，一级标题直接带状态，
-    // 状态层只剩真正要「切换值」的四项（点一下换下一个，看当前值才知道点完是什么）。
-    '状态：嗓子 · 关',
-    '状态：眼睛 · 关',
-    '状态：歌词 · 关',
+    // 【0.6 第 4 步 补】嗓子归「听」了，状态层只留不归看/听/陪伴的东西。
     // 11-11 m20199：联网查资料（默认开）
     '状态：联网查 · 开',
     // 11-01 新增：装插件这一项不依赖桥是否连上（新用户第一次就靠它把插件装进 DSH）
@@ -84,35 +87,45 @@ test('状态二级：顺序是 嗓子/眼睛/歌词/联网查、值跟着真实�
     companionRunning: true,
     companionIntervalMs: 120000,
     lyricRunning: true,
+    earResident: true,
     vision: 'local',
     voice: 'remote',
     watch: { running: true, pace: 'normal' },
   }).filter((label) => label.startsWith(STATE_PREFIX));
-  assert.deepEqual(on, [
-    '状态：嗓子 · 云',
-    '状态：眼睛 · 本地',
-    '状态：歌词 · 开',
-    '状态：联网查 · 开',
-    '状态：接入 · 装插件到 DSH…',
-  ]);
+  assert.deepEqual(on, ['状态：联网查 · 开', '状态：接入 · 装插件到 DSH…']);
+  // 嗓子、歌词、听常驻、眼睛都不再占状态层（0.6 第 4 步 补）
+  assert.ok(!on.some((label) => label.includes('嗓子') || label.includes('歌词') || label.includes('眼睛')));
 });
 
-test('看一眼层：标题带状态 + 开关 + 现在看一眼 + 自定义时间…', () => {
+test('看层：取景三档 + 记录目录 + 看图模型 + 一眼看常驻（0.6 第 4 步）', () => {
   const off = petMenuLabels(idle);
-  // 哥哥 11-09 晚：时长全部收进自定义小窗，菜单里不再一项一档
-  assert.ok(off.includes('看一眼 · 关：开（点一下开）'), '关着的时候第一项就是打开它');
-  assert.ok(off.includes('看一眼 · 关：现在看一眼'), '要能立刻看一眼');
-  assert.ok(off.includes('看一眼 · 关：自定义时间…'), '要能开小窗填时间');
-  assert.ok(!off.some((label) => label.startsWith('看一眼 · 关：开 ')), '不该再列具体档位');
-  assert.ok(!off.some((label) => label.includes('关掉')), '没开的时候不该有关停项');
+  // 【0.6 第 4 步 补二 · 哥哥 m33196】看是三层：一级带状态、二级是分组、三级是具体选项
+  assert.ok(off.includes('看 · 一眼看 关：取景 · ✓ 自动：全屏'), '取景三档摆成三级');
+  assert.ok(off.includes('看 · 一眼看 关：取景 · ✓ 自动：窗口'), '三档都看得见');
+  assert.ok(off.includes('看 · 一眼看 关：看图 · ✓ 关：本地'), '看图三档摆成三级');
+  assert.ok(off.includes('看 · 一眼看 关：看记录目录（打开）…'), '记录目录归「看」');
+  assert.ok(off.includes('看 · 一眼看 关：一眼看：关（点一下开）'), '一眼看单独成组');
+  // 一眼看整组：开关 + 现在看一眼 + 自定义时间
+  assert.ok(off.includes('看 · 一眼看 关：一眼看：关（点一下开）'), '关着的时候第一项就是打开它');
+  assert.ok(off.includes('看 · 一眼看 关：一眼看：现在看一眼'), '要能立刻看一眼');
+  assert.ok(off.includes('看 · 一眼看 关：一眼看：自定义时间…'), '要能开小窗填时间');
+  // 【0.6 第 4 步 补】嗓子搬到「听」层
+  assert.ok(off.some((label) => label.includes('：嗓子 · ')), '嗓子在听层');
+  assert.ok(off.some((label) => label.startsWith('听 · 耳朵常驻 ')), '听层一级标题带状态');
+  assert.ok(!off.some((label) => label.startsWith('状态：嗓子')), '状态层不该再有嗓子');
+  assert.ok(!off.some((label) => label.startsWith('看一眼')), '旧一级「看一眼」不该再出现');
+  assert.ok(!off.some((label) => label.startsWith('取景')), '旧一级「取景」不该再出现');
 
-  // 11-09 晚 m16273：关着的时候一级也要报配置好的时长 / 档位
+  // 关着也要看见配置的间隔
   const paused = petMenuLabels({ ...idle, companionIntervalMs: 120000, watch: { running: false, pace: 'calm' } });
-  assert.ok(paused.includes('看一眼 · 关（2 分钟）：开（点一下开）'), '关着也要看见配置的时长');
-  assert.ok(paused.includes('陪伴 · 关（轻）：开（点一下开）'), '关着也要看见配置的档位');
+  assert.ok(paused.includes('看 · 一眼看 关：一眼看：关（2 分钟，点一下开）'), '关着也要看见配置的时长');
+  assert.ok(paused.includes('陪伴 · 关（轻）：开（点一下开）'), '陪伴层照样报档位');
   const on = petMenuLabels({ ...idle, companionRunning: true, companionIntervalMs: 120000 });
-  assert.ok(on.includes('看一眼 · 开 2 分钟：✓ 开着（点一下关）'), '开着时标题报间隔、第一项是关掉它');
-  assert.ok(!on.some((label) => label.startsWith('看一眼 · 关：')), '开着时标题不该还是「关」');
+  assert.ok(on.includes('看 · 一眼看 开：一眼看：✓ 开着（2 分钟）'), '开着时报间隔 + 关掉它的入口');
+  // 看图当前档跟着状态走
+  const saved = petMenuLabels({ ...idle, vision: 'local' });
+  assert.ok(saved.includes('看 · 一眼看 关：看图 · ✓ 本地：云'));
+  assert.ok(!saved.some((label) => label.includes('看图 · ✓ 关')));
 });
 
 test('陪伴层（原看护）：标题带状态 + 开关 + 三档节奏 + 出声', () => {
@@ -125,8 +138,12 @@ test('陪伴层（原看护）：标题带状态 + 开关 + 三档节奏 + 出�
       `缺少节奏 ${pace}`,
     );
   }
-  // 哥哥 11-09 晚：陪伴单独一个出声开关，默认关（安静只看不说）
-  assert.ok(off.includes('陪伴 · 关：不出声（点一下开）'), '默认关');
+  // 【11-20 m34789】声音统一成一个开关（voice.speak）：没设就是出声；关掉才静音
+  assert.ok(off.includes('陪伴 · 关：✓ 会出声（点一下静音）'), '默认出声');
+  assert.ok(
+    petMenuLabels({ ...idle, speakEnabled: false }).includes('陪伴 · 关：不出声（点一下开）'),
+    '静音时显示不出声',
+  );
   assert.ok(!off.some((label) => label.includes('关掉')), '没开的时候不该有关停项');
 
   const on = petMenuLabels({ ...idle, watch: { running: true, pace: 'dense', speak: true } });
@@ -137,14 +154,19 @@ test('陪伴层（原看护）：标题带状态 + 开关 + 三档节奏 + 出�
     1,
     '同一档位不能既有 ✓ 又无 ✓',
   );
+  // 【11-20 m34789】声音统一成一个开关（voice.speak），没设就是出声
   assert.ok(on.includes('陪伴 · 开（密）：✓ 会出声（点一下静音）'));
   assert.ok(!on.some((label) => label.startsWith('陪伴 · 关：')), '开着时标题不该还是「关」');
 });
 
 test('陪伴层：出声文案说清状态 + 记录目录那一行（11-09 晚 m16399）', () => {
-  const off = petMenuLabels({ ...idle, watch: { running: true, pace: 'normal', speak: false } });
+  // 【11-20 m34789】陪伴的出声项改成读全局 voice.speak（说层那一个闸），不再读 watch.speak
+  const off = petMenuLabels({ ...idle, speakEnabled: false, watch: { running: true, pace: 'normal' } });
   assert.ok(off.includes('陪伴 · 开（正常）：不出声（点一下开）'), '没开声音要写「不出声（点一下开）」');
-  assert.ok(off.includes('取景：看他看到的（记录目录）…'), '记录目录入口归到取景这一层');
+  assert.ok(
+    off.some((label) => label.includes('：看记录目录（打开）…')),
+    '记录目录入口归到「看」这一层',
+  );
   assert.deepEqual(parsePetMenuLabel('陪伴：✓ 会出声（点一下静音）'), { kind: 'watch-voice-toggle' });
   assert.deepEqual(parsePetMenuLabel('陪伴：不出声（点一下开）'), { kind: 'watch-voice-toggle' });
   assert.deepEqual(parsePetMenuLabel('陪伴：看他看到的（记录目录）…'), { kind: 'watch-open-log' });
@@ -305,16 +327,16 @@ test('真实 MenuRegistry：注册 → 点击 → 长轮询取回，读一次就
   const registry = new MenuRegistry();
   assert.equal(registry.register({ owner: PET_MENU_OWNER, labels: petMenuLabels(idle) }).ok, true);
 
-  const clicked = registry.click({ owner: PET_MENU_OWNER, label: '看一眼 · 关：现在看一眼', pet: 'main' });
+  const clicked = registry.click({ owner: PET_MENU_OWNER, label: '看 · 一眼看 关：一眼看：现在看一眼', pet: 'main' });
   assert.deepEqual(clicked, { ok: true, delivered: true });
 
   const events = await registry.poll(PET_MENU_OWNER, 10);
   assert.ok(events);
-  assert.equal(events['看一眼 · 关：现在看一眼'], 'main');
+  assert.equal(events['看 · 一眼看 关：一眼看：现在看一眼'], 'main');
 
   const again = await registry.poll(PET_MENU_OWNER, 10);
   assert.ok(again);
-  assert.equal(again['看一眼 · 关：现在看一眼'], null, '读取即消费：闩锁不是队列');
+  assert.equal(again['看 · 一眼看 关：一眼看：现在看一眼'], null, '读取即消费：闩锁不是队列');
 });
 
 test('owner 被清掉后 poll 回 null —— 宿主必须重新注册', async () => {
@@ -345,8 +367,7 @@ test('陪伴层一级标题带模式（11-16 m21257）：陪伴 · 全屏/窗口
     on.some((label) => label.startsWith('陪伴 · 开（密）：✓ 开着（点一下关）')),
     '一级标题要写明按「视频」那套盯',
   );
-  assert.ok(on.includes('取景：✓ 窗口'));
-  assert.ok(on.includes('取景：全屏') && on.includes('取景：自动'), '三档都在一级');
+  assert.ok(on.includes('看 · 一眼看 关：取景 · ✓ 窗口：全屏'), '取景三档里当前档是窗口');
   assert.ok(!on.some((label) => label.startsWith('游戏陪伴')), '改回「陪伴 · 模式」了，旧名一行都不该剩');
 
   // 头里多出来的「· 模式」不影响解析：档位、模式、出声、记录都照样认
@@ -376,4 +397,25 @@ test('陪伴层一级标题带模式（11-16 m21257）：陪伴 · 全屏/窗口
   };
   assert.match(petStatusText(facts as never), /陪伴：开 正常·窗口/u);
   assert.doesNotMatch(petStatusText({ ...facts, watchMode: 'auto' } as never), /·自动/u, '自动不占字');
+});
+
+
+test('说层（11-20 哥哥 m34789）：出不出声 / 怎么出声 / 音量 / 试一句', () => {
+  const on = petMenuLabels({ ...idle, speakEnabled: true, voicePick: 'edge', voiceVolume: 90 });
+  assert.ok(on.includes('说 · 出声：✓ 出声（点一下静音）'));
+  assert.ok(on.includes('说 · 出声：嗓子 · ✓ Edge：Edge'));
+  assert.ok(on.includes('说 · 出声：嗓子 · ✓ Edge：Windows'));
+  assert.ok(on.includes('说 · 出声：音量 90（点一下小一点）'));
+  assert.ok(on.includes('说 · 出声：试一句'));
+  // 嗓子不许再挂在「听」下面（听只管耳朵）
+  assert.ok(!on.some((label) => label.startsWith('听 · ') && label.includes('嗓子')), '嗓子已搬到说层');
+  const off = petMenuLabels({ ...idle, speakEnabled: false });
+  assert.ok(off.includes('说 · 静音：静音（点一下出声）'));
+  // 解析：三层的标题状态先剥掉，剩下 说：… 才匹配
+  assert.deepEqual(parsePetMenuLabel('说 · 出声：✓ 出声（点一下静音）'), { kind: 'say-toggle' });
+  assert.deepEqual(parsePetMenuLabel('说 · 静音：静音（点一下出声）'), { kind: 'say-toggle' });
+  assert.deepEqual(parsePetMenuLabel('说 · 出声：嗓子 · ✓ Edge：Edge'), { kind: 'voice-set', pick: 'edge' });
+  assert.deepEqual(parsePetMenuLabel('说 · 出声：音量 90（点一下小一点）'), { kind: 'say-volume' });
+  assert.deepEqual(parsePetMenuLabel('说 · 出声：试一句'), { kind: 'speak' });
+  assert.equal(petMenuFeedback({ kind: 'say-toggle' }, { ok: true, message: '静音了（只看不说）' }), '静音了（只看不说）');
 });

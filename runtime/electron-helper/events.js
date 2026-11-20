@@ -444,7 +444,53 @@ function applyMenuLeaf(leaf) {
   for (const s of sprites) s.menuItems = items;
 }
 
-/** 跑一拍 /state。返回 true = "按长轮询命中"（宿主支持长轮询，可以立刻再请求） */
+/**
+ * 把一份 /state 快照应用到界面。
+ *
+ * 【11-19】从 `pollStateOnce` 里抽出来：SSE 推来的 `state` 事件形状与 `/state` 完全一致，
+ * 两条来源共用这一段，避免「轮询能显示、SSE 不显示」这种两套逻辑。
+ * 返回 true = 首拉（只记基线，不渲染）。
+ */
+function applyStateSnapshot(s) {
+  if (!s) return false;
+  if (stateBaseline === null) {
+    stateBaseline = S.flattenCounters(s); // 首拉：只记基线，不渲染（避免启动/重载时重放旧气泡）
+    // 第三方菜单项是**当前状态**不是事件：首拉就要装上，否则 helper 重启后要等下次注册才出现
+    applyMenuLeaf(s.sections ? s.sections.menu : null);
+    return true;
+  }
+  for (const change of S.takeChanged(s, stateBaseline)) {
+    if (change.leaf.data === null) continue;
+    if (change.path === 'sections.balance') applyBalanceLeaf(change.leaf);
+    else if (change.path === 'sections.workStatus') applyWorkStatusLeaf(change.leaf);
+    else if (change.path === 'sections.menu') applyMenuLeaf(change.leaf);
+    else if (change.path.startsWith('pets.') && change.path.endsWith('.say')) {
+      // 宠物 id **允许含点号**：按前缀/后缀切片，绝不 split('.')
+      applySayLeaf(change.path.slice('pets.'.length, -'.say'.length), change.leaf);
+    } else if (change.path.startsWith('pets.') && change.path.endsWith('.anim')) {
+      // 点播动画：同样按前缀/后缀切片（counter 每次写入都递增，连点两次也会分发两次）
+      applyAnimLeaf(change.path.slice('pets.'.length, -'.anim'.length), change.leaf);
+    } else if (change.path.startsWith('pets.') && change.path.endsWith('.position')) {
+      // 位置指令：同样按前缀/后缀切片，绝不 split('.')
+      applyPositionLeaf(change.path.slice('pets.'.length, -'.position'.length), change.leaf);
+    } else if (change.path.startsWith('pets.') && change.path.endsWith('.throw')) {
+      // 抛掷指令：同上
+      applyThrowLeaf(change.path.slice('pets.'.length, -'.throw'.length), change.leaf);
+    } else if (change.path.startsWith('pets.') && change.path.endsWith('.lyric')) {
+      // 【本鱼改造 · 歌词气泡】独立叶子，不跟 say 抢：宿主/插件写入 pets.<id>.lyric
+      applyLyricLeaf(change.path.slice('pets.'.length, -'.lyric'.length), change.leaf);
+    } else if (change.path.startsWith('pets.') && change.path.endsWith('.hint')) {
+      // 【汐儿 · 11-16 m21310】状态提示：任务类常驻（在看/在想），事件类短时
+      applyHintLeaf(change.path.slice('pets.'.length, -'.hint'.length), change.leaf);
+    } else if (change.path.startsWith('pets.') && change.path.endsWith('.lock')) {
+      // 占用锁：同上切片，绝不 split('.')。它是**状态**不是指令（见 applyLockLeaf）
+      applyLockLeaf(change.path.slice('pets.'.length, -'.lock'.length), change.leaf);
+    }
+  }
+  return false;
+}
+
+/** 跑一拍 /state（长轮询）。返回 true = "按长轮询命中"（宿主支持长轮询，可以立刻再请求） */
 async function pollStateOnce() {
   try {
     const s = await S.fetchState(
@@ -456,40 +502,7 @@ async function pollStateOnce() {
     // 这时必须退回固定间隔轮询，否则这个循环就是忙等。
     stateLongPoll = typeof s.counter === 'number';
     if (stateLongPoll) stateSince = s.counter;
-    if (stateBaseline === null) {
-      stateBaseline = S.flattenCounters(s); // 首拉：只记基线，不渲染（避免启动/重载时重放旧气泡）
-      // 第三方菜单项是**当前状态**不是事件：首拉就要装上，否则 helper 重启后要等下次注册才出现
-      applyMenuLeaf(s.sections ? s.sections.menu : null);
-      return true;
-    }
-    for (const change of S.takeChanged(s, stateBaseline)) {
-      if (change.leaf.data === null) continue;
-      if (change.path === 'sections.balance') applyBalanceLeaf(change.leaf);
-      else if (change.path === 'sections.workStatus') applyWorkStatusLeaf(change.leaf);
-      else if (change.path === 'sections.menu') applyMenuLeaf(change.leaf);
-      else if (change.path.startsWith('pets.') && change.path.endsWith('.say')) {
-        // 宠物 id **允许含点号**：按前缀/后缀切片，绝不 split('.')
-        applySayLeaf(change.path.slice('pets.'.length, -'.say'.length), change.leaf);
-      } else if (change.path.startsWith('pets.') && change.path.endsWith('.anim')) {
-        // 点播动画：同样按前缀/后缀切片（counter 每次写入都递增，连点两次也会分发两次）
-        applyAnimLeaf(change.path.slice('pets.'.length, -'.anim'.length), change.leaf);
-      } else if (change.path.startsWith('pets.') && change.path.endsWith('.position')) {
-        // 位置指令：同样按前缀/后缀切片，绝不 split('.')
-        applyPositionLeaf(change.path.slice('pets.'.length, -'.position'.length), change.leaf);
-      } else if (change.path.startsWith('pets.') && change.path.endsWith('.throw')) {
-        // 抛掷指令：同上
-        applyThrowLeaf(change.path.slice('pets.'.length, -'.throw'.length), change.leaf);
-      } else if (change.path.startsWith('pets.') && change.path.endsWith('.lyric')) {
-        // 【本鱼改造 · 歌词气泡】独立叶子，不跟 say 抢：宿主/插件写入 pets.<id>.lyric
-        applyLyricLeaf(change.path.slice('pets.'.length, -'.lyric'.length), change.leaf);
-      } else if (change.path.startsWith('pets.') && change.path.endsWith('.hint')) {
-        // 【汐儿 · 11-16 m21310】状态提示：任务类常驻（在看/在想），事件类短时
-        applyHintLeaf(change.path.slice('pets.'.length, -'.hint'.length), change.leaf);
-      } else if (change.path.startsWith('pets.') && change.path.endsWith('.lock')) {
-        // 占用锁：同上切片，绝不 split('.')。它是**状态**不是指令（见 applyLockLeaf）
-        applyLockLeaf(change.path.slice('pets.'.length, -'.lock'.length), change.leaf);
-      }
-    }
+    applyStateSnapshot(s);
     return true;
   } catch {
     /* 轻量轮询失败静默：下一拍再试 */
@@ -497,10 +510,16 @@ async function pollStateOnce() {
   }
 }
 
-function startLoops() {
-  if (loopsStarted) return;
-  loopsStarted = true;
+// ---------- 统一状态：SSE 优先，长轮询兜底 ----------
+// 为什么要换：长轮询空闲时仍然 1 请求/秒（一天 8.6 万个请求，全是「没变」）。
+// SSE 只有一条连接，宿主有变化才推。连不上（老宿主 / 被防火墙挡）就退回长轮询，
+// 行为与改造前完全一致 —— 这条兜底不能删，否则老包配新壳会整只不动。
+let stateStreamOn = false;
+let statePolling = false;
 
+function startStatePolling() {
+  if (statePolling) return;
+  statePolling = true;
   // 统一轮询：**自调度长轮询**（请求 → 处理 → 立刻再请求）。宿主在版本没变时挂起，所以
   // 空闲时是 1 请求/秒（与改造前一致），叶子一变立刻收到——不需要"前端动作后叫醒一拍"了
   // （动作端点都会写叶子 → 版本变 → 挂着的这一拍自己就返回）。本窗口只装一只宠物，
@@ -510,4 +529,50 @@ function startLoops() {
     setTimeout(() => void stateLoop(), hit && stateLongPoll ? 0 : 1000);
   };
   void stateLoop();
+}
+
+/** 开 SSE。返回 true = 已经接管（不用再跑轮询）。一次都没成功过 → 交回轮询。 */
+function startStateStream() {
+  if (stateStreamOn) return true;
+  if (typeof EventSource !== 'function') return false;
+  stateStreamOn = true;
+  let sawMessage = false;
+  let source;
+  try {
+    source = new EventSource(EVENTS_URL);
+  } catch {
+    stateStreamOn = false;
+    return false;
+  }
+  source.addEventListener('state', (event) => {
+    sawMessage = true;
+    try {
+      applyStateSnapshot(JSON.parse(event.data));
+    } catch (error) {
+      console.error('[dsh-pet] SSE state 解析失败：' + String(error));
+    }
+  });
+  source.addEventListener('error', () => {
+    // 浏览器会自动重连；只有在「一次都没收到过」时才判定宿主不支持，退回轮询。
+    if (!sawMessage) {
+      try {
+        source.close();
+      } catch {
+        /* 已经关了 */
+      }
+      stateStreamOn = false;
+      console.error('[dsh-pet] SSE 连不上，退回 /state 长轮询');
+      startStatePolling();
+    }
+  });
+  return true;
+}
+
+function startLoops() {
+  if (loopsStarted) return;
+  loopsStarted = true;
+
+  // 统一状态：能走 SSE 就走 SSE，走不了退回长轮询（见上面 startStatePolling 的说明）
+  if (!startStateStream()) startStatePolling();
+
 }

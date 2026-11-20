@@ -31,6 +31,7 @@ import { PET_CALL_IDENTITY, noTextReason } from './llm-call';
 import { supportsReasoningOff } from './llm-reasoning';
 import { extractChatImage, memeCatalog, type MemeEntry } from './memes';
 import { modelCandidates, modelLabel, type ModelRef } from './model-selection';
+import { takeReadySentences } from './say-split';
 
 /** 生成失败原因（与 shared/whisper.ts 的 WhisperState 失败分支同构） */
 export type ChatGenerateResult =
@@ -202,6 +203,11 @@ export async function generateChatViaGateway(
   timeoutMs = TIMEOUT_MS,
   /** 【汐儿 · 11-17 第 3 批】外面来的取消信号（他被新消息顶掉时，这一轮不必再算完） */
   externalSignal?: AbortSignal,
+  /**
+   * 【汐儿 · 11-20 半流式】每确定一句就报一次；调用方拿去提前合成嗓子（省掉「整段生成完才开口」）。
+   * 不传 = 老行为，一字不差。
+   */
+  onSentence?: (line: string) => void,
 ): Promise<ChatGenerateResult> {
   const wantImage = pool.length > 0;
   // 【汐儿 · 11-10】配图清单进 system，user 正文保持纯文本（原先拼在用户那句尾巴上，
@@ -210,6 +216,22 @@ export async function generateChatViaGateway(
   const timeout = AbortSignal.timeout(timeoutMs);
   const signal = externalSignal === undefined ? timeout : AbortSignal.any([timeout, externalSignal]);
   let text = '';
+  // 已经把哪几句报出去了（语气词并句会让边界后移，所以按「已报条数」而不是按内容去重）
+  let emitted = 0;
+  const report = (final: boolean): void => {
+    if (onSentence === undefined) return;
+    const ready = takeReadySentences(text, emitted, final);
+    emitted += ready.length;
+    for (const line of ready) {
+      // 配图标记不是话，别拿去合成（`[图:可爱]` 会让嗓子念一句空气）
+      if (/^\[图[:：][^\]]*\]$/u.test(line.trim())) continue;
+      try {
+        onSentence(line);
+      } catch {
+        // 预热失败只是一个优化没生效，绝不许影响正文
+      }
+    }
+  };
   try {
     for await (const frame of gateway.chat({
       messages: [
@@ -219,7 +241,11 @@ export async function generateChatViaGateway(
       ],
       signal,
     })) {
-      if (frame.type === 'text' && typeof frame.text === 'string') text += frame.text;
+      if (frame.type === 'text' && typeof frame.text === 'string') {
+        text += frame.text;
+        // 边收边报：末段不算（还会继续长），只看已经带句末标点的那几句
+        report(false);
+      }
       if (frame.type === 'error') {
         return { ok: false, reason: 'generate-error', message: frame.error?.message ?? '网关调用失败' };
       }
@@ -227,6 +253,7 @@ export async function generateChatViaGateway(
   } catch (e) {
     return { ok: false, reason: 'generate-error', message: e instanceof Error ? e.message : String(e) };
   }
+  report(true);
   text = text.trim();
   if (!text) return { ok: false, reason: 'generate-error', message: '模型回了空话' };
   if (!wantImage) return { ok: true, text };

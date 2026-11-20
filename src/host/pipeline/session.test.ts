@@ -75,11 +75,21 @@ describe('换卷式上下文（落盘）', () => {
     assert.match(archived, /aaaa/u);
     // 当场拿到的是本地摘要（不等模型）
     assert.match(result.session.summaryFrom ?? '', /本地摘要/u);
-    // 后台补完，落到同一个卷
-    await new Promise((resolve) => setImmediate(resolve));
-    await new Promise((resolve) => setTimeout(resolve, 30));
-    const fresh = JSON.parse(readFileSync(join(dir, 'session.json'), 'utf8'));
-    assert.match(fresh.summaryFrom, /修好声音/u);
+    // 后台补完，落到同一个卷。
+    // 别用「睡 30ms」硬等：全量跑几百个文件时机器很忙，后台摘要晚 100ms 就红
+    // （2026-11-20 实测：单跑必过、全量偶发失败）。改成轮询到 2 秒，稳。
+    const deadline = Date.now() + 2_000;
+    let fresh: { summaryFrom?: string; turns: unknown[] } = { turns: [] };
+    while (Date.now() < deadline) {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+      try {
+        fresh = JSON.parse(readFileSync(join(dir, 'session.json'), 'utf8')) as typeof fresh;
+      } catch {
+        continue;
+      }
+      if (/修好声音/u.test(fresh.summaryFrom ?? '') && logs.some((l) => l.startsWith('roll summary ok'))) break;
+    }
+    assert.match(fresh.summaryFrom ?? '', /修好声音/u);
     assert.ok(fresh.turns.length <= KEEP_RECENT);
     assert.ok(logs.some((line) => line.startsWith('roll local')));
     assert.ok(logs.some((line) => line.startsWith('roll summary ok')));

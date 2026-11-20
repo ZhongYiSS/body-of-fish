@@ -86,6 +86,16 @@ test('whisperEnabled：默认允许，读得出也写得进（碎碎念总开关
   assert.equal((after.pets as any[])[0].whisperEnabled, false);
 });
 
+test('earResident：耳朵常驻开关（顶层 ear.resident，默认关）', () => {
+  // 没写 → 关（默认不为 3 秒延迟常驻 1.5G 内存）
+  assert.equal(viewOf({}).earResident, false);
+  assert.equal(viewOf({ ear: { resident: true } }).earResident, true);
+  // 写进去只动 resident，ear 段别的字段不许丢
+  const next = applyPatch({ ear: { resident: false, note: 'keep' } }, validatePetSettings({ earResident: true }));
+  assert.deepEqual(next.ear, { resident: true, note: 'keep' });
+  assert.equal(viewOf(next).earResident, true);
+});
+
 test('whisperIntervalMin：间隔只认 eventsRefreshSec.whisper 这一份（分钟进、秒出）', () => {
   // 没写 → 60 秒 = 1 分钟（和陪伴的节奏接壤，11-01 定）
   assert.equal(viewOf({}).whisperIntervalMin, 1);
@@ -509,4 +519,42 @@ test('地址字段写错要报错点名，别静默丢', () => {
 test('mergeLook 死键已删掉（再传就是未知字段）', () => {
   assert.throws(() => validatePetSettings({ mergeLook: true }), /出错的字段：mergeLook/u);
   assert.ok(!petSettingsPage.includes("get('mergeLook')"), '页面不该再读 mergeLook');
+});
+
+// 【汐儿 · 11-19 哥哥 m29978】地址要能清：空串默认仍是「不修改」，显式勾「清除地址」才真清。
+test('清空地址：clearVisionAddress / clearVoiceAddress 能把地址真清成空', () => {
+  // 配置里的形态是**扁平**的（model.vision.kind/baseUrl 直接挂在能力下）
+  const base = {
+    model: {
+      chat: { enabled: true, kind: 'remote', baseUrl: 'https://chat.example/v1', model: 'm' },
+      vision: { enabled: true, kind: 'remote', baseUrl: 'https://vision.example/v1', model: 'vm', apiKey: 'sk-v' },
+      tts: { enabled: true, kind: 'local', endpoint: 'http://127.0.0.1:9880', model: '希儿', protocol: 'sovits' },
+    },
+  } as never;
+  const capOf = (cfg: Record<string, unknown>, key: 'chat' | 'vision' | 'tts'): Record<string, unknown> =>
+    ((cfg.model as Record<string, unknown>)[key] ?? {}) as Record<string, unknown>;
+
+  // 普通保存（空串）= 不修改，地址还在
+  const keep = applyPatch(structuredClone(base), { visionBaseUrl: '', voiceEndpoint: '' } as never);
+  assert.equal(capOf(keep, 'vision').baseUrl, 'https://vision.example/v1');
+  assert.equal(capOf(keep, 'tts').endpoint, 'http://127.0.0.1:9880');
+
+  // 勾了「清除地址」才真清
+  const cleared = applyPatch(structuredClone(base), { clearVisionAddress: true, clearVoiceAddress: true } as never);
+  assert.equal(capOf(cleared, 'vision').baseUrl, '');
+  assert.equal(capOf(cleared, 'tts').endpoint, '');
+  // 密钥、模型名、协议不许被顺手清掉
+  assert.equal(capOf(cleared, 'vision').apiKey, 'sk-v');
+  assert.equal(capOf(cleared, 'vision').model, 'vm');
+  assert.equal(capOf(cleared, 'tts').model, '希儿');
+  assert.equal(capOf(cleared, 'tts').protocol, 'sovits');
+  // 对话那套一个字都不动
+  assert.equal(capOf(cleared, 'chat').baseUrl, 'https://chat.example/v1');
+});
+
+test('设置页有「清除地址」两个勾选框，并进提交体', () => {
+  for (const id of ['clearVisionAddress', 'clearVoiceAddress']) {
+    assert.ok(petSettingsPage.includes(`id="${id}"`), `页面缺 ${id}`);
+    assert.ok(petSettingsScript.includes(`${id}: get('${id}').checked`), `提交体缺 ${id}`);
+  }
 });

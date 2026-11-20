@@ -24,10 +24,10 @@ const codeOnly = (text: string): string =>
 
 const code = codeOnly(host.split('\r\n').join('\n'));
 
-describe('嘴的账本：logs/speak.log', () => {
-  test('noteSpeak 写的是 speak.log，且和 bubble / sense 同一个写法', () => {
+describe('嘴的账本：logs/mouth.log 的 [speak] 行', () => {
+  test('noteSpeak 写进 mouth.log，tag 是 speak（11-19 八本并三本）', () => {
     assert.match(code, /const noteSpeak = \(line: string\): void => \{/u);
-    assert.match(code, /appendFile\(join\(dir, 'speak\.log'\)/u);
+    assert.match(code, /noteLog\('mouth\.log', 'speak', line\)/u);
   });
 
   test('四类事件都记账：start / finish / drop / interrupt', () => {
@@ -42,8 +42,9 @@ describe('嘴的账本：logs/speak.log', () => {
     assert.ok(code.includes('noteSpeak(`drop key=${spec.key} reason=stuck'), '保底闸要记 stuck');
   });
 
-  test('原来的两份账本还在（不拿 speak.log 顶替它们）', () => {
-    assert.ok(code.includes("'bubble.log'"), 'bubble.log 要保留');
-    assert.ok(code.includes("'voice-play.log'"), 'voice-play.log 要保留');
+  test('气泡与播放也进同一本，用 tag 区分（不再各开一个文件）', () => {
+    assert.ok(code.includes("noteLog('mouth.log', 'bubble', line)"), '[bubble] 要在 mouth.log');
+    assert.ok(code.includes("noteLog('mouth.log', 'play', line)"), '[play] 要在 mouth.log');
+    assert.ok(code.includes("noteLog('mouth.log', 'say-loud', line)"), '[say-loud] 要在 mouth.log');
   });
 });

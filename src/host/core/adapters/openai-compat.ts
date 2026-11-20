@@ -98,6 +98,28 @@ export interface CompatMessage {
   content: string | CompatContentPart[];
 }
 
+/**
+ * 按魔数认图格式（PNG / JPEG / GIF / WEBP）。
+ *
+ * 为什么要它：0.6 起识图改送 JPEG，但调用链里没有一处传 mime，
+ * 以前全靠默认 'image/png'——真送 JPEG 时 data URL 会写错格式，有的端点会直接拒。
+ * 认不出来就按 PNG（我们只会出这两样）。
+ */
+export function sniffImageMime(bytes: Uint8Array): string {
+  const b = bytes;
+  if (b.length >= 3 && b[0] === 0xff && b[1] === 0xd8 && b[2] === 0xff) return 'image/jpeg';
+  if (b.length >= 8 && b[0] === 0x89 && b[1] === 0x50 && b[2] === 0x4e && b[3] === 0x47) return 'image/png';
+  if (b.length >= 3 && b[0] === 0x47 && b[1] === 0x49 && b[2] === 0x46) return 'image/gif';
+  if (
+    b.length >= 12 &&
+    b[0] === 0x52 && b[1] === 0x49 && b[2] === 0x46 && b[3] === 0x46 &&
+    b[8] === 0x57 && b[9] === 0x45 && b[10] === 0x42 && b[11] === 0x50
+  ) {
+    return 'image/webp';
+  }
+  return 'image/png';
+}
+
 /** 把字节 + mime 包成 data URL（识图走这条；不落盘、不外传）。 */
 export function toDataUrl(bytes: Uint8Array, mime = 'image/png'): string {
   return `data:${mime};base64,${Buffer.from(bytes).toString('base64')}`;
@@ -315,6 +337,28 @@ async function streamVision(
 }
 
 /** 看图说一句话（data URL 塞进 user 消息）。 */
+/**
+ * 【11-20 0.6 第 3 步】识图慢的第二个大头：**这个端点默认把 token 花在思考上**。
+ * 同一张 1536 宽 jpg、同一句提示词（真实实测）：
+ *   默认 → 13,574ms（reasoning 652 token）；`thinking:{type:'disabled'}` → 1,665ms（reasoning 0）。
+ * 看图不需要长篇推理，思考反而把 max_tokens 吃光——400 token 档下正文直接是空的。
+ * 有的端点不认这两个字段（400），所以按顺序试三档，记住能过的那一档。
+ */
+const VISION_KNOBS: ReadonlyArray<Record<string, unknown>> = [
+  { thinking: { type: 'disabled' }, reasoning_effort: 'none' },
+  { reasoning_effort: 'none' },
+  {},
+];
+
+/** 每个 baseUrl 记住「哪一档能过」，省掉每次先撞一次 400 */
+const visionKnobOk = new Map<string, number>();
+
+/** 参数被拒（400/422 这类「字段不认识」）才值得换下一档 */
+function isKnobRejected(error: unknown): boolean {
+  if (!(error instanceof ModelCallError)) return false;
+  return error.code === 'bad-response' || error.code === 'unsupported';
+}
+
 export async function compatVision(
   backend: RemoteBackend,
   imageBytes: Uint8Array,
@@ -326,7 +370,7 @@ export async function compatVision(
       role: 'user',
       content: [
         { type: 'text', text: prompt },
-        { type: 'image_url', image_url: { url: toDataUrl(imageBytes, options.mime) } },
+        { type: 'image_url', image_url: { url: toDataUrl(imageBytes, options.mime ?? sniffImageMime(imageBytes)) } },
       ],
     },
   ];
@@ -337,36 +381,56 @@ export async function compatVision(
    * 读出来的内容反而更干净（「Codex CLI / WSL / 窗口标题」）。看图不需要长篇推理。
    * 有些 OpenAI 兼容端点不认这个字段（400），那就去掉再试一次——宁可多 200ms，也不能因为参数被拒就不识图。
    */
-  const body = { model: backend.model, messages, temperature: 0.8, stream: false };
-  if (options.onDelta) {
-    /**
-     * 【11-16 体检】流式中途断了**不能整段重来**：前面已经吐出去的字收不回来，
-     * 再问一遍会让同一次「看一眼」说两遍（气泡说完又重说），还白花一份合成钱。
-     * 已经吐过字就用已吐的收场；一个字都没吐（端点不支持流式 / 连不上）才退回整段请求。
-     */
-    let emitted = '';
-    const track = (chunk: string): void => {
-      emitted += chunk;
-      options.onDelta?.(chunk);
-    };
-    try {
-      return await streamVision(backend, { ...body, reasoning_effort: 'none' }, { ...options, onDelta: track });
-    } catch {
-      if (emitted.trim() !== '') return emitted;
-      /* 流式不通（端点不支持 / 半路断）就退回下面的整段请求，最多多花一次 */
+  /**
+   * max_tokens 是给「看图说话」的长尾兜底：正常情况下她只回一两句，
+   * 但端点偶尔会一直往下写，卡住整轮（哥哥说的「看一眼半天不吭声」）。800 够说三五句。
+   */
+  const body = { model: backend.model, messages, temperature: 0.8, stream: false, max_tokens: 800 };
+  const knobStart = Math.min(visionKnobOk.get(backend.baseUrl) ?? 0, VISION_KNOBS.length - 1);
+  const knobLast = VISION_KNOBS.length - 1;
+  for (let i = knobStart; i <= knobLast; i += 1) {
+    const knob = VISION_KNOBS[i] as Record<string, unknown>;
+    if (options.onDelta) {
+      /**
+       * 【11-16 体检】流式中途断了**不能整段重来**：前面已经吐出去的字收不回来，
+       * 再问一遍会让同一次「看一眼」说两遍（气泡说完又重说），还白花一份合成钱。
+       * 已经吐过字就用已吐的收场；一个字都没吐（端点不支持流式 / 连不上）才退回整段请求。
+       */
+      let emitted = '';
+      const track = (chunk: string): void => {
+        emitted += chunk;
+        options.onDelta?.(chunk);
+      };
+      try {
+        const streamed = await streamVision(backend, { ...body, ...knob }, { ...options, onDelta: track });
+        if (streamed.trim() !== '' || emitted.trim() !== '') {
+          visionKnobOk.set(backend.baseUrl, i);
+          return streamed.trim() !== '' ? streamed : emitted;
+        }
+      } catch (error) {
+        if (emitted.trim() !== '') {
+          visionKnobOk.set(backend.baseUrl, i);
+          return emitted;
+        }
+        /* 参数被拒 → 换下一档；其它（连不上/半路断）就退回整段请求再试同一档 */
+        if (isKnobRejected(error)) continue;
+      }
     }
+    let json: unknown;
+    try {
+      json = await postJson(backend, { ...body, ...knob }, options);
+    } catch (error) {
+      /* 只有「参数不认识」才换下一档：网络断了/超时了，换个参数再打一遍只是白等 */
+      if (isKnobRejected(error) && i < knobLast) continue;
+      throw error;
+    }
+    const text = extractText(json);
+    /* 空正文不换档：关掉思考还回空，说明是模型/额度的事，换个参数更慢更糟 */
+    if (!text) throw new ModelCallError('bad-response', '识图回了个空结论');
+    visionKnobOk.set(backend.baseUrl, i);
+    return text;
   }
-  let json: unknown;
-  try {
-    json = await postJson(backend, { ...body, reasoning_effort: 'none' }, options);
-  } catch (error) {
-    const code = error instanceof ModelCallError ? error.code : '';
-    if (code !== 'bad-response' && code !== 'unsupported') throw error;
-    json = await postJson(backend, body, options);
-  }
-  const text = extractText(json);
-  if (!text) throw new ModelCallError('bad-response', '识图回了个空结论');
-  return text;
+  throw new ModelCallError('bad-response', '识图这条路三档参数都试过了，都不行');
 }
 
 /** 发声：OpenAI 兼容 `/audio/speech` 直出音频字节。 */

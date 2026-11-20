@@ -1703,7 +1703,12 @@ class PetSprite {
       return index < 0 ? null : petTree.splice(index, 1)[0];
     };
     const statusBranch = takeBranch('状态');
-    const lookBranch = takeBranch('看一眼');
+    // 【0.6 第 4 步】「取景」改名「看」（并把一眼看、看图模型并进来）；新增「听」层
+    const lookBranch = takeBranch('看');
+    const hearBranch = takeBranch('听');
+    // 【11-21 哥哥 m35246】「说」层要排在「听」下面：壳不认识的层会掉到 petTree 尾巴（碎碎念之后），
+    //   所以这里必须显式摘出来、按顺序摆。
+    const sayBranch = takeBranch('说');
     const companionBranch = takeBranch('陪伴');
     const whisperBranch = takeBranch('碎碎念');
     // 「更多」里只剩维护项：开关（原「显示位置」）+ 回到初始位置 + 第三方项（设置…）
@@ -1725,10 +1730,12 @@ class PetSprite {
     // 「点击穿透」（原「避免误触」）提到一级：它一开身体就点不到了，属于容易找不到的功能，
     // 藏在「更多」里等于没有（哥哥 10-31 定）。
     const clickThroughLabel = this.clickThroughOn ? '✓ 点击穿透（身体点不到）' : '点击穿透（身体点不到）';
-    // 顺序：状态 → 看一眼 → 陪伴 → 对话 → 碎碎念 → （其它第三方层）→ 重载配置 → 点击穿透 → 动作 → 更多
+    // 顺序：状态 → 看 → 听 → 说 → 陪伴 → 对话 → 碎碎念 → （其它第三方层）→ 重载配置 → 点击穿透 → 动作 → 更多
     const tree = [
       ...(statusBranch ? [statusBranch] : []),
       ...(lookBranch ? [lookBranch] : []),
+      ...(hearBranch ? [hearBranch] : []),
+      ...(sayBranch ? [sayBranch] : []),
       ...(companionBranch ? [companionBranch] : []),
       { label: '对话', action: 'chat' },
       ...(whisperBranch ? [whisperBranch] : []),

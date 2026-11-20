@@ -12,38 +12,11 @@
  * 为什么截两次：指纹要的是**同一时刻**的小图（省内存、算得快），识图要的是能看清的整图。
  * 一次 ffmpeg 只能出一样，所以并发跑两个进程；只有陪伴开着的时候才会跑（默认关）。
  */
-import { spawn } from 'node:child_process';
-import { mkdirSync, readFileSync } from 'node:fs';
+import { mkdirSync, readFileSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 
+import { captureGray, captureJpegFile } from './capture';
 import { THUMB_BYTES } from './companion';
-import { ddaInput, ddaVf } from './capture-source';
-
-/** 跑一个命令，收下 stdout（stderr 只留最后一行用于报错）。 */
-function run(command: string, args: string[], timeoutMs = 10_000): Promise<Buffer> {
-  return new Promise((resolve, reject) => {
-    const child = spawn(command, args, { windowsHide: true });
-    const out: Buffer[] = [];
-    let err = '';
-    const timer = setTimeout(() => {
-      child.kill();
-      reject(new Error(`命令超时：${command}`));
-    }, timeoutMs);
-    child.stdout.on('data', (chunk: Buffer) => out.push(chunk));
-    child.stderr.on('data', (chunk: Buffer) => {
-      err = String(chunk).slice(-500);
-    });
-    child.on('error', (error) => {
-      clearTimeout(timer);
-      reject(error);
-    });
-    child.on('close', (code) => {
-      clearTimeout(timer);
-      if (code === 0) resolve(Buffer.concat(out));
-      else reject(new Error(`${command} 退出码 ${code}：${err.trim()}`));
-    });
-  });
-}
 
 export interface ScreenCapture {
   /** 64×36 灰度 rawvideo（2304 字节），给 companion 算指纹 */
@@ -57,7 +30,7 @@ export interface ScreenCaptureOptions {
   ffmpegPath?: string;
   /** 工作目录（临时图存这里，退出不清也无所谓，覆盖写） */
   dir: string;
-  /** 全屏截图的宽度（高度按 16:9 算给 ffmpeg，实际按屏幕比例裁切） */
+  /** 全屏截图的宽度；不传就按屏幕宽现算（1536 / 宽屏 1920），高度按比例 */
   width?: number;
 }
 
@@ -70,7 +43,7 @@ export interface ScreenCaptureOptions {
 export function createScreenCapture(options: ScreenCaptureOptions): ScreenCapture {
   const ffmpeg = options.ffmpegPath?.trim() || 'ffmpeg';
   const dir = options.dir;
-  const width = options.width ?? 960;
+  const width = options.width;
   let shot: string | undefined;
   let seq = 0;
 
@@ -78,22 +51,24 @@ export function createScreenCapture(options: ScreenCaptureOptions): ScreenCaptur
     async capture(): Promise<Uint8Array> {
       mkdirSync(dir, { recursive: true });
       seq += 1;
-      const png = join(dir, `shot-${seq % 4}.png`);
-      const raw = join(dir, `thumb-${seq % 4}.raw`);
-      // 两个进程并发：一个出能看的整图，一个出算指纹的小图
+      // 识图看的那张改 JPEG（2026-11-20 m31592）：1536~1920 宽、qv4，约 320~460KB，
+      // 比原来 960 宽的 PNG 又清楚又小。算指纹的小图仍是 raw（2304 字节）。
+      const jpg = join(dir, `shot-${seq % 4}.jpg`);
+      // 【11-20 体检】指纹（2304 字节的灰度小图）和给人看的截图原来混在同一层，
+      // 翻目录时一堆 .raw 看不出哪个是图。挪进 thumbs/，顺手清掉老位置留下的那 4 个。
+      const thumbDir = join(dir, 'thumbs');
+      mkdirSync(thumbDir, { recursive: true });
+      for (let i = 0; i < 4; i += 1) rmSync(join(dir, `thumb-${i}.raw`), { force: true });
+      const raw = join(thumbDir, `thumb-${seq % 4}.raw`);
+      // 0.6 起截图只有 jpg（原先是 960 宽的 png）。同一个槽位写过 jpg 就把老 png 清掉，
+      // 免得两次改版留下的旧格式越攒越多（哥哥 m32229：「该合并的合并」）。
+      rmSync(join(dir, `shot-${seq % 4}.png`), { force: true });
+      // 两个进程并发：一个出能看的整图，一个出算指纹的小图（都走 capture.ts，超时一致）
       await Promise.all([
-        run(ffmpeg, [
-          '-hide_banner', '-loglevel', 'error',
-          ...ddaInput(),
-          '-frames:v', '1', '-vf', ddaVf(`scale=${width}:-1`), '-y', png,
-        ]),
-        run(ffmpeg, [
-          '-hide_banner', '-loglevel', 'error',
-          ...ddaInput(),
-          '-frames:v', '1', '-vf', ddaVf('scale=64:36,format=gray'), '-f', 'rawvideo', '-y', raw,
-        ]),
+        captureJpegFile({ ffmpegPath: ffmpeg, file: jpg, ...(width === undefined ? {} : { width }) }),
+        captureGray({ ffmpegPath: ffmpeg, file: raw }),
       ]);
-      shot = png;
+      shot = jpg;
       const bytes = readFileSync(raw);
       if (bytes.byteLength < THUMB_BYTES) {
         throw new Error(`截图太小：${bytes.byteLength} 字节（期望 ${THUMB_BYTES}）`);

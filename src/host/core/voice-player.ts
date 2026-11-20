@@ -37,6 +37,8 @@ export interface VoicePlayerOptions {
   readonly pollMs?: number;
   /** 等「常驻进程进入就绪」的上限，默认 4000 */
   readonly startupTimeoutMs?: number;
+  /** 诊断输出（宿主接到 mouth.log 的 [play] 行上，起不来时要看得见原因） */
+  readonly log?: (line: string) => void;
 }
 
 export interface VoicePlayResult {
@@ -73,11 +75,21 @@ export function daemonScript(dir: string): string {
     'Add-Type -AssemblyName PresentationCore',
     '$mp = New-Object System.Windows.Media.MediaPlayer',
     `$cmd = ${cmdFile}`,
+    `$silent = ${q(join(dir, 'silent.wav'))}`,
     `$state = ${stateFile}`,
     "$last = ''",
     '$playing = $false',
     '$endAt = 0',
     "$current = ''",
+    // 【11-20 汐儿】消息泵：WPF MediaPlayer 靠消息队列推进，光 Start-Sleep 会「静着不响」。
+    //   DoEvents 走 System.Windows.Forms（.NET Framework 自带），比手搓 DispatcherFrame 稳。
+    'Add-Type -AssemblyName System.Windows.Forms',
+    '$pump = { [System.Windows.Forms.Application]::DoEvents() }',
+    // 先握手：起得来才写 READY；宿主靠它判断「真就绪」，不再靠「400 毫秒后还活着」
+    "[IO.File]::WriteAllText($state, 'READY')",
+    '$silentOk = Test-Path -LiteralPath $silent',
+    '$lastAt = [Environment]::TickCount',
+    '$warmGapMs = 30000',
     'while ($true) {',
     "  $text = ''",
     '  if (Test-Path -LiteralPath $cmd) { try { $text = [IO.File]::ReadAllText($cmd) } catch { } }',
@@ -86,6 +98,10 @@ export function daemonScript(dir: string): string {
     "    $parts = $text.Split('|')",
     "    if ($parts[0] -eq 'PLAY') {",
     '      if ($playing) { $mp.Stop() }',
+    // 空闲太久先放 150 毫秒静音把音频端点叫醒（哥哥 11-20「只有别的软件出声时才发音」）
+    '      if ($silentOk -and ([Environment]::TickCount - $lastAt) -gt $warmGapMs) {',
+    '        try { $mp.Open([uri]$silent); $mp.Volume = 0.02; $mp.Play(); & $pump; Start-Sleep -Milliseconds 150 } catch { }',
+    '      }',
     '      try {',
     '        $mp.Open([uri]$parts[1])',
     '        $mp.Volume = [double]$parts[2]',
@@ -97,6 +113,7 @@ export function daemonScript(dir: string): string {
     '        if ($mp.NaturalDuration.HasTimeSpan) { $ms = [int]$mp.NaturalDuration.TimeSpan.TotalMilliseconds }',
     '        $endAt = [Environment]::TickCount + $ms',
     "        [IO.File]::WriteAllText($state, 'PLAYING|' + $parts[3])",
+    '        $lastAt = [Environment]::TickCount + $ms',
     '      } catch {',
     '        $playing = $false',
     "        [IO.File]::WriteAllText($state, 'FAILED|' + $parts[3])",
@@ -118,9 +135,37 @@ export function daemonScript(dir: string): string {
     '    $playing = $false',
     "    [IO.File]::WriteAllText($state, 'DONE|' + $current)",
     '  }',
-    '  Start-Sleep -Milliseconds 30',
+    '  & $pump',
+    '  Start-Sleep -Milliseconds 20',
     '}',
   ].join('\n');
+}
+
+/**
+ * 一段静音的 wav（16kHz 单声道 16bit）。
+ *
+ * 【11-20 汐儿】干什么：空闲久了音频端点会睡，哥哥报「只有别的软件在出声时才发音」——
+ * daemon 在长时间没播之后先放 150 毫秒静音把端点踢醒，再放真声音。
+ * 什么时候别用：正常连着说的时候每次都放会白占 150 毫秒，只在「距上次播放超过 30 秒」时放。
+ */
+export function silentWav(ms = 150): Buffer {
+  const samples = Math.max(1, Math.round((16_000 * ms) / 1000));
+  const dataLen = samples * 2;
+  const buf = Buffer.alloc(44 + dataLen);
+  buf.write('RIFF', 0, 'ascii');
+  buf.writeUInt32LE(36 + dataLen, 4);
+  buf.write('WAVE', 8, 'ascii');
+  buf.write('fmt ', 12, 'ascii');
+  buf.writeUInt32LE(16, 16);
+  buf.writeUInt16LE(1, 20); // PCM
+  buf.writeUInt16LE(1, 22); // 单声道
+  buf.writeUInt32LE(16_000, 24);
+  buf.writeUInt32LE(32_000, 28);
+  buf.writeUInt16LE(2, 32);
+  buf.writeUInt16LE(16, 34);
+  buf.write('data', 36, 'ascii');
+  buf.writeUInt32LE(dataLen, 40);
+  return buf;
 }
 
 /** 把一段音频塞进命令文件：`PLAY|路径|音量|序号`（序号变 = 内容变 = daemon 会重播同一句）。 */
@@ -142,11 +187,19 @@ export function createVoicePlayer(options: VoicePlayerOptions = {}): VoicePlayer
   } catch {
     /* 建不出来就当作不可用 */
   }
+  try {
+    if (!existsSync(join(dir, 'silent.wav'))) writeFileSync(join(dir, 'silent.wav'), silentWav(150));
+  } catch {
+    /* 写不出来就只是少了暖机，不影响出声 */
+  }
   let child: ChildProcess | null = null;
   let ready = false;
   let starting = false;
   let seq = 0;
   let disposed = false;
+  /** 起失败后 30 秒内不再重试，免得每句都白起一个 PowerShell */
+  let failedUntil = 0;
+  const log = options.log ?? ((): void => {});
   /** 最近一次 STOP 的时刻：用来判断这次结束是不是被淡出打断的（11-18 踩过 faded 恒 false） */
   let stoppedAt = 0;
 
@@ -170,38 +223,70 @@ export function createVoicePlayer(options: VoicePlayerOptions = {}): VoicePlayer
   /** 起常驻进程；ok 之前一直拿 ffplay 顶着 */
   const start = (): void => {
     if (starting || disposed || child !== null) return;
+    if (Date.now() < failedUntil) return;
     starting = true;
     try {
       writeFileSync(stateFile, '');
     } catch {
       /* 清不掉也能用 */
     }
+    // 【11-20 汐儿】必须把命令文件也清空！上一轮 dispose 写的 `QUIT|x|0` 会留在盘上，
+    //   新 daemon 一进主循环就读到它，第一件事就是自杀（实测：就绪 346ms 后 code=0 退出，
+    //   于是每一句都退回 1.5 秒的一次性播放器 —— 这正是「via=daemon 一条都没有」的真凶）。
+    writeCmd('');
+    let stderr = '';
     try {
       child = spawn(
         'powershell.exe',
-        ['-NoProfile', '-NonInteractive', '-STA', '-Command', daemonScript(dir)],
-        { windowsHide: true, stdio: 'ignore' },
+        [
+          '-NoProfile',
+          '-NonInteractive',
+          '-STA',
+          // 【11-20 汐儿】改 -EncodedCommand：`-Command` 传多行脚本会被引号吃掉，PowerShell 会
+          //   退回「读 stdin」然后就那么挂着——实测「进程活着但一条命令都不理」，就绪判据还当真了。
+          '-EncodedCommand',
+          Buffer.from(daemonScript(dir), 'utf16le').toString('base64'),
+        ],
+        { windowsHide: true, stdio: ['ignore', 'ignore', 'pipe'] },
       );
-    } catch {
+    } catch (error) {
       starting = false;
+      failedUntil = Date.now() + 30_000;
+      log(`daemon 起不来：${error instanceof Error ? error.message : String(error)}`);
       return;
     }
-    child.on('close', () => {
+    child.stderr?.on('data', (chunk: Buffer) => {
+      stderr = (stderr + chunk.toString('utf8')).slice(-400);
+    });
+    child.on('close', (code) => {
+      const wasReady = ready;
       child = null;
       ready = false;
       starting = false;
+      if (wasReady) log(`daemon 退出了 code=${String(code)} ${stderr.trim()}`);
     });
-    // 就绪判据：能读到状态文件就算活了（daemon 一起来就先写一次空状态以外的东西不容易判断，
-    // 所以这里靠「先写空、首次 PLAY 之前也算就绪」——反正 PLAY 之后有 PLAYING 回报）
+    // 【11-20 汐儿】就绪判据改成「读到 READY」（daemon 起来第一件事就是写它），
+    //   超时就把这条进程收掉、30 秒内不再重试，免得每句都白起一个 PowerShell。
     const startedAt = Date.now();
     const tick = (): void => {
-      if (disposed) return;
-      if (child === null) return;
+      if (disposed || child === null) return;
       if (ready) return;
-      if (Date.now() - startedAt >= 400) {
-        // PowerShell 起来 + Add-Type 大概几百毫秒；没崩就当它可用
+      if (readState() === 'READY') {
         ready = true;
         starting = false;
+        log(`daemon 就绪 ${Date.now() - startedAt}ms`);
+        return;
+      }
+      if (Date.now() - startedAt >= startupTimeoutMs) {
+        starting = false;
+        failedUntil = Date.now() + 30_000;
+        log(`daemon ${String(Math.round(startupTimeoutMs / 1000))} 秒没握手（${stderr.trim() === '' ? '无输出' : stderr.trim()}），这段改用一次性播放器`);
+        try {
+          child?.kill();
+        } catch {
+          /* 已经退了 */
+        }
+        child = null;
         return;
       }
       setTimeout(tick, 50).unref?.();
@@ -278,10 +363,11 @@ export function createVoicePlayer(options: VoicePlayerOptions = {}): VoicePlayer
         }, 600).unref?.();
       }
       child = null;
+      // 【11-20 汐儿】收摊后把命令文件抹空，别把 QUIT 留在盘上毒下一轮（start() 还会再清一次）
       try {
-        if (existsSync(cmdFile)) writeFileSync(cmdFile, 'QUIT|x|0');
+        if (existsSync(cmdFile)) writeFileSync(cmdFile, '');
       } catch {
-        /* 清不掉就算了 */
+        /* 清不掉就靠 start() 那一次 */
       }
     },
   };

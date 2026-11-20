@@ -21,7 +21,7 @@ export type SceneKind = 'game' | 'video' | 'code' | 'other' | '';
 export interface TalkTopic {
   /** 话题主题（游戏名 + 事件类型之类，用来判「是不是同一件事」） */
   key: string;
-  /** 想说的那句（≤30 字） */
+  /** 想说的那句（≤20 字，与 STYLE_RULES 同源） */
   text: string;
   /** 看到它的时刻 */
   at: number;
@@ -59,6 +59,7 @@ export const DEFAULT_WATCH_PROMPT = [
   '【你在干的事】你坐在哥哥旁边，一边看他屏幕一边随口搭话。不是解说员，不是助手，也不报幕。',
   '【你看到的】{{picture}}',
   '【窗口】{{window}}',
+  '【他这会儿】{{context}}',
   '【这段的剧情】{{bili}}',
   '（这是背景资料，不是台词：别说还没看到的部分，也别照着念；跟画面对不上就以画面为准。）',
   '【他现在这一局】以画面为准，档案只是参考：',
@@ -71,10 +72,11 @@ export const DEFAULT_WATCH_PROMPT = [
   '{{idle}}',
   '',
   '只回这几行，别的什么都不要写。顺序也别换——第一行就得是「要说的话」，本鱼要先拿到这句才能开口：',
-  '3|要说的话：≤30 字，或者只写 -',
-  '1|关键点：≤60 字。他在玩什么/看什么 + 一个画面能确认的具体对象（人名、装备、关卡、视频标题、报错文字）。不要写窗口标题、按钮、鼠标位置、颜色变化。',
+  '3|要说的话：≤20 字（和说话规矩同一个数），或者只写 -。**没看懂、或者没什么好说的就写 -**；也可以闲扯一句跟屏幕无关的（今天的事、吃喝、天气、撒娇），不必句句都贴着画面。',
+  '（宁可少说一句，也别把界面元素念成一句话——「他打开了设置页」这种谁都知道的不要说。）',
+  '1|关键点：≤60 字。**先判断他在干什么**（写代码 / 看视频 / 玩游戏 / 聊天 / 读文档），再补一个画面能确认的具体对象（人名、装备、关卡、视频标题、报错文字）。不要写窗口标题、按钮、鼠标位置、颜色变化、界面布局。认不清就只写「认不清」，别拿窗口名和颜色凑。',
   '2|重要性：1=日常 2=值得搭一句 3=要紧（死了/卡住/过关/出错）。这一档要 {{impNeed}} 以上才算值得说。',
-  '4|现况：≤60 字，更新「他现在在干什么」，没变化就留空。',
+  '4|现况：≤60 字，只写你真的从画面上看出来的「他现在在干什么」；跟上次一样、或者认不清，就留空。',
   '7|要看细节：画面里有个东西你看不清又真想知道，就写要问的那一句（≤20 字）；不用就别写这行。',
   '',
   '{{style}}',
@@ -86,7 +88,8 @@ export const DEFAULT_WATCH_PROMPT = [
 
 /** 「回看」那一问的默认模板；可用占位符：question */
 export const DEFAULT_DETAIL_PROMPT = [
-  '这是刚刚那一屏的原图（1280×800）。',
+  '这是刚刚那一屏的原图（整屏截图，宽 1536 上下）。',
+  '他在看的是：{{window}}',
   '只回答这一件事：{{question}}',
   '40 字以内，直接给答案（名字、数字、字面上的字），不要描述画面，不要评价，不要称呼，不要念文件名和路径。看不清就写「看不清」。',
 ].join('\n');
@@ -151,7 +154,9 @@ export function parseWatchReply(text: string): WatchReply {
     if (!hit) continue;
     const slot = hit[1];
     const body = hit[2]!.trim();
-    if (slot === '1') out.note = clean(body, 60);
+    // 【11-20 体检】模板写的是 `1|关键点：…`，模型经常把这四个字一起回过来，
+    // 60 字上限就被白吃了，笔记里也一直挂着「关键点：」。
+    if (slot === '1') out.note = clean(body.replace(/^(关键点|笔记|观察|要点)\s*[:：]?\s*/u, ''), 60);
     else if (slot === '2') {
       const n = Number((/\d/.exec(body) ?? ['1'])[0]);
       out.imp = n >= 1 && n <= 3 ? n : 1;
@@ -201,6 +206,10 @@ export interface WatchPromptInput {
   wiki?: string;
   /** 这轮拿到的整片剧情梗概（B站才有；空 = 没拿到） */
   bili?: string;
+  /** 【汐儿 · 11-19 m30770】他这会儿的状态：窗口时间线 / 离开多久 / 窗口形状 */
+  context?: string;
+  /** 这张是「过去几张拼的宫格」而不是单帧（哥哥 m30766 定的 3×2） */
+  grid?: boolean;
   /** 这一档节奏的重要性门槛 */
   impNeed: number;
   /** 自定义提示词模板（空 = 用内置那一套） */
@@ -228,9 +237,11 @@ function idleLine(idleMs: number): string {
  */
 export function buildWatchPrompt(input: WatchPromptInput): string {
   const { scene } = input;
-  const picture = input.cropped === true
-    ? '一张截图：只截了他正在用的那个窗口（不是整个屏幕），就是刚刚那一刻。'
-    : '一张整屏截图：就是刚刚那一刻。';
+  const picture = input.grid === true
+    ? '一张拼图：过去这几分钟里的 6 张截图拼成 3×2，从左到右、从上到下按时间先后，每格左上角是拍摄时间。看的是「这段时间发生了什么」。'
+    : input.cropped === true
+      ? '一张截图：只截了他正在用的那个窗口（不是整个屏幕），就是刚刚那一刻。'
+      : '一张整屏截图：就是刚刚那一刻。';
   const recent = input.notes.slice(-6).map((n) => `- ${hhmm(n.at)} ${n.note}（重要 ${n.imp}）`).join('\n');
   const events = scene.events.length > 0 ? scene.events.map((e) => `- ${e}`).join('\n') : '- （还没记下什么）';
   const said = input.lastSaid === ''
@@ -239,11 +250,14 @@ export function buildWatchPrompt(input: WatchPromptInput): string {
   const template = input.template !== undefined && input.template.trim() !== ''
     ? input.template
     : DEFAULT_WATCH_PROMPT;
-  return renderTemplate(template, {
+  const built = renderTemplate(template, {
     persona: input.persona,
     // 【汐儿 · 11-17 m26171】说话规矩与聊天共用一份，不再各处自己写
     style: STYLE_RULES,
     picture,
+    context: input.context !== undefined && input.context.trim() !== ''
+      ? input.context.trim()
+      : '（没什么可补充的，就看画面）',
     window: input.window !== undefined && input.window.trim() !== ''
       ? `${input.window.trim()}（从窗口标题读到的，不一定准；和画面打架就以画面为准）`
       : '（不知道，按画面判断）',
@@ -260,6 +274,11 @@ export function buildWatchPrompt(input: WatchPromptInput): string {
     idle: idleLine(input.idleMs),
     impNeed: String(input.impNeed),
   });
+  // 自定义模板里没写 {{context}} 的，补一行在开头附近（不然这段上下文就白拿了）
+  if (!template.includes('{{context}}') && input.context !== undefined && input.context.trim() !== '') {
+    return `【他这会儿】${input.context.trim()}\n${built}`;
+  }
+  return built;
 }
 
 /** 把一条候选话题并进池子：同 key 的合并（保留最新的说法），满了丢最旧最不重要的 */
@@ -336,7 +355,8 @@ export function idleAllowsSpeak(idleMs: number, imp: number): boolean {
 /**
  * 「回看」那一问的 prompt（哥哥 m18222）：拿最近那一帧单张大图，只回答她问的那件事。
  */
-export function buildDetailPrompt(question: string, template?: string): string {
+export function buildDetailPrompt(question: string, template?: string, windowName = ''): string {
   const tpl = template !== undefined && template.trim() !== '' ? template : DEFAULT_DETAIL_PROMPT;
-  return renderTemplate(tpl, { question });
+  const window = windowName.trim() === '' ? '不知道' : windowName.trim();
+  return renderTemplate(tpl, { question, window });
 }

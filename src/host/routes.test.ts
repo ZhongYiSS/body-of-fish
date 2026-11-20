@@ -852,3 +852,19 @@ describe('接口收敛：已删除的 9 条死路由（11-16 体检，零调用�
     assert.equal(r.status, 200);
   });
 });
+
+describe('/services/asr —— 听.py 问「这一句要不要走常驻的耳朵」', () => {
+  test('GET 回 { resident, manual, watch }；默认关（陪伴没开、用户没开）', async () => {
+    const r = await call('/dsh-pet-7340/services/asr');
+    assert.equal(r.status, 200, r.body);
+    const body = JSON.parse(r.body) as { ok: boolean; resident: boolean; manual: boolean; watch: boolean; error?: string };
+    assert.equal(body.ok, true);
+    assert.equal(body.manual, false, '用户没开 ear.resident');
+    assert.equal(body.watch, false, '测试里陪伴没跑');
+    assert.equal(body.resident, false, '两个条件都不满足 → 不常驻');
+  });
+
+  test('非 GET → 405', async () => {
+    assert.equal((await call('/dsh-pet-7340/services/asr', 'POST', '{}')).status, 405);
+  });
+});
