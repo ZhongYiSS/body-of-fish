@@ -1,6 +1,6 @@
 {
   "name": "body-of-fish",
-  "version": "0.6.0",
+  "version": "0.6.1",
   "description": "本鱼陪伴（Body of Fish）：吃白饭的蓝色大肥鱼，赖在 DeepSeek Harness 里不走了。",
   "icon": "assets/logo.png",
   "keywords": [
@@ -157,6 +157,7 @@
       "runtime/electron-helper/**/*",
       "assets/**/*",
       "packaging/electron-main.cjs",
+      "!runtime/electron-helper/*.bak-*",
       "!node_modules/**/*",
       "package.json"
     ],

@@ -16,17 +16,18 @@ const { spawn } = require('node:child_process');
 const { existsSync, mkdirSync, writeFileSync, appendFileSync, readFileSync } = require('node:fs');
 const path = require('node:path');
 
-const PYTHON = 'D:\\AI\\GPT-SoVITS\\.venv\\Scripts\\python.exe';
-const SCRIPT = 'D:\\AI\\工具箱\\听.py';
+const PYTHON = (process.env.DSH_PET_PYTHON || 'D:\\AI\\GPT-SoVITS\\.venv\\Scripts\\python.exe').trim();
+const SCRIPT = (process.env.DSH_PET_EAR_SCRIPT || 'D:\\AI\\工具箱\\听.py').trim();
 const HOTKEY = 'Alt+T';
 /** 「看一眼」的默认热键（10-29 加）：和「听」一样可在设置页改 */
 const PEEK_HOTKEY = 'Alt+G';
 /** 「说一句」的默认热键（10-30 加）：等价于点右键菜单「声音 → 说一句」 */
 const SAY_HOTKEY = 'Alt+S';
 /** 装好/失败都写一份状态：helper 的 stdout 走宿主管道、看不到，落盘才验得了 */
-const STATUS_FILE = 'D:\\AI\\存档\\临时\\桌宠\\ear-status.json';
+const LOG_DIR = (process.env.DSH_PET_LOG_DIR || path.join(process.env.TEMP || process.env.TMP || '.', 'dsh-pet-logs')).trim();
+const STATUS_FILE = path.join(LOG_DIR, 'ear-status.json');
 /** 「听」的事件流水（按热键、录音、识别、回话），排查用 */
-const EVENT_LOG = 'D:\\AI\\存档\\临时\\桌宠\\ear.log';
+const EVENT_LOG = path.join(LOG_DIR, 'ear.log');
 /** 热键改在哪：设置页写的就是这个文件（陪伴插件的 companion.json）；测的时候可用 env 换掉 */
 const CONFIG_FILE =
   process.env.DSH_PET_EAR_CONFIG || 'C:\\Users\\hb109\\.dsh\\plugins\\dsh-pet-extras\\companion.json';
@@ -238,6 +239,29 @@ function ensureDaemon() {
 let lastHotkeyAt = 0;
 let hotkeyFired = false;
 
+/**
+ * 按键当下就让她闭嘴，不等 python 起。
+ * 【汐儿 · 11-22 m35406】哥哥报「一定要一句说完才能打断」：原来打断只写在 听.py 的 rec_start 里，
+ * 而 python 是按键那一刻才拉起的（冷启 1~2 秒），再叠 urllib 的 3 秒超时 —— 按键到闭嘴能拖 3 秒，
+ * ear.log 里实测 15:44:42 按键 → 15:44:45 stop-loud 超时。这里 fire-and-forget，失败不影响录音。
+ */
+function stopLoudNow() {
+  try {
+    void fetch(petBase() + '/stop-loud?pet=main', {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        ...(process.env.DSH_PET_API_TOKEN ? { 'x-dsh-pet-token': process.env.DSH_PET_API_TOKEN } : {}),
+      },
+      body: '{}',
+    })
+      .then((res) => appendEvent('stop-loud-now', String(res.status)))
+      .catch((e) => appendEvent('stop-loud-now-error', e && e.message ? e.message : String(e)));
+  } catch (e) {
+    appendEvent('stop-loud-now-error', e && e.message ? e.message : String(e));
+  }
+}
+
 function toggle() {
   const now = Date.now();
   if (now - lastHotkeyAt > 400) hotkeyFired = false;
@@ -245,6 +269,8 @@ function toggle() {
   if (hotkeyFired) return;
   hotkeyFired = true;
   appendEvent('hotkey', '');
+  // 开始说话这一下先掐掉她正在念的（正在录的那一下按停不必再掐）
+  if (earPhaseNow !== 'listen') stopLoudNow();
   if (!ensureDaemon()) return;
   if (!child || !child.stdin || !child.stdin.writable) {
     log('管道没准备好，这次按了不算');

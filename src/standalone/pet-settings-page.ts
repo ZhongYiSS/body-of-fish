@@ -58,12 +58,13 @@ export const petSettingsPage = `<!doctype html>
 <button id="profile-rename" class="profile-mini" type="button">改名</button>
 <button id="profile-remove" class="profile-mini" type="button">删除这套</button>
 </div>
-<p class="hint" id="profile-hint" hidden>一套方案 = 对话 + 看图 + 声音的整套设置。点页签就换（换之前会先把这一套的改动存回去）；新的一套从当前设置复制出来。</p>
+<p class="hint" id="profile-hint" hidden>一套方案 = 对话 + 看图 + 声音的整套设置（联网查那块单独存，不跟方案走）。点页签就换（换之前会先把这一套的改动存回去）；新的一套从当前设置复制出来。</p>
 <fieldset class="model-section"><legend>模型（联网）</legend>
 <div class="mtabs" role="tablist">
 <button class="mtab is-on" type="button" data-mtab="chat">对话模型</button>
 <button class="mtab" type="button" data-mtab="vision">看图</button>
 <button class="mtab" type="button" data-mtab="voice">声音</button>
+<button class="mtab" type="button" data-mtab="search">联网查</button>
 </div>
 <div class="mpane is-on" data-mpane="chat">
 <div class="pair"><label for="protocol">接口协议</label><select id="protocol" name="protocol"><option value="openai-compatible">OpenAI 兼容</option><option value="anthropic">Anthropic</option></select></div>
@@ -121,6 +122,17 @@ export const petSettingsPage = `<!doctype html>
 <label for="ttsHeaders">会话头（每行一条 <code>Key: Value</code>，只对「模型直连」生效；留空 = 不带）</label>
 <textarea id="ttsHeaders" rows="3" maxlength="4000" spellcheck="false" placeholder="x-whatever-key: 值"></textarea>
 <p class="hint">GPT-SoVITS 靠「参考音 + 它说的那句话」定音色，两个都要填、且必须对得上；标准接口不用管这两栏。「Windows 自带」离线免费、是机器音；「Edge 在线」不用填地址和 key、要联网。云端时接口地址与密钥可以单独填，留空就沿用对话模型那一份。</p>
+</div>
+<div class="mpane" data-mpane="search">
+<fieldset><legend>联网查（搜索）</legend>
+<div class="pair"><label for="searchProvider">搜索来源</label><select id="searchProvider"><option value="free">免费（抓搜索引擎结果页）</option><option value="deepseek">DeepSeek 搜索（要 key，一条能带六七百字摘要）</option></select></div>
+<div class="pair"><label for="searchBaseUrl">接口地址（留空 = https://api.deepseek.com）</label><input id="searchBaseUrl" type="url" maxlength="2048" placeholder="https://api.deepseek.com"></div>
+<div class="pair"><label for="searchApiKey">key</label><input id="searchApiKey" type="password" autocomplete="off" maxlength="8192" placeholder="留空 = 保留已保存的那把"><span id="search-key-state" class="hint">没填过</span></div>
+<div class="pair"><label for="searchModel">模型（选填，只给兼容别家接口用）</label><input id="searchModel" type="text" maxlength="200" placeholder="DeepSeek 自己不用填"></div>
+<label class="check"><input id="clearSearchApiKey" type="checkbox"> 清掉搜索用的 key</label>
+<p class="hint"><b>免费</b>是抓必应 / 搜狗 / 360 的结果页（现在 360 优先、会点进前两条读正文），实在抓不到正文才只剩标题和一两句摘要。<b>DeepSeek 搜索</b>走官方 <code>/v1/tools/search</code>，每条结果带 600~800 字长摘要和相关度打分，按次计费（约 0.005 元一次）；没填 key 时自动按免费跑，不会卡住。</p>
+<p class="hint">这块跟「模型方案」不联动：切方案不会改搜索来源和 key。</p>
+</fieldset>
 </div>
 </fieldset>
 </div>
@@ -379,9 +391,17 @@ export const petSettingsScript = `
       'visionBaseUrl', 'voiceHeaders', 'ttsHeaders', 'voiceMode', 'voiceProtocol', 'voiceEndpoint', 'voiceModel', 'voiceBaseUrl',
       'voiceRefAudio', 'voicePromptText', 'voiceVolume', 'voiceStaleSec', 'voiceGapMs',
       'contextRollChars', 'contextCardInject', 'mouthQueueMax',
+      'searchBaseUrl', 'searchModel',
       'earHotkey', 'peekHotkey', 'sayHotkey']) {
       const el = get(id); if (el && data[id] !== undefined) el.value = String(data[id]);
     }
+    // 联网查的来源 + 「key 有没有填过」（key 本身不回显，输入框清空、清空勾选框复位）
+    const sourceSel = get('searchProvider');
+    if (sourceSel) sourceSel.value = data.searchProvider === 'deepseek' ? 'deepseek' : 'free';
+    const searchState = get('search-key-state');
+    if (searchState) searchState.textContent = data.hasSearchApiKey === true ? '已保存 · 不回显' : '没填过（按免费跑）';
+    const searchKeyInput = get('searchApiKey'); if (searchKeyInput) searchKeyInput.value = '';
+    const clearSearch = get('clearSearchApiKey'); if (clearSearch) clearSearch.checked = false;
     // 嗓子四块：先把四份草稿装好，再按当前那块铺到控件上
     seedVoiceDraft(data);
     // 密钥不回显：只报「有没有」，输入框清空，勾选框复位
@@ -499,6 +519,11 @@ export const petSettingsScript = `
       // 快捷键：留空 = 用默认（Alt+T / Alt+G / Alt+S），写成空串交给后端删键
       earHotkey: get('earHotkey').value.trim(), peekHotkey: get('peekHotkey').value.trim(),
       sayHotkey: get('sayHotkey').value.trim(),
+      // 联网查的来源（11-22 m35769）：来源 + 地址 + 模型，key 只在非空时提交（空 = 保留）
+      searchProvider: get('searchProvider') ? get('searchProvider').value : undefined,
+      searchBaseUrl: get('searchBaseUrl') ? get('searchBaseUrl').value.trim() : undefined,
+      searchModel: get('searchModel') ? get('searchModel').value.trim() : undefined,
+      clearSearchApiKey: get('clearSearchApiKey') ? get('clearSearchApiKey').checked : undefined,
       watchPrompt: get('watchPrompt') ? get('watchPrompt').value : undefined,
       watchMode: get('watchMode') ? get('watchMode').value : undefined,
       watchWindowHwnd: get('watchWindowHwnd') ? Number(get('watchWindowHwnd').value) : undefined,
@@ -511,6 +536,8 @@ export const petSettingsScript = `
     // 密钥只在非空时提交（空 = 保留已保存的那把）
     const visionKey = get('visionApiKey').value; if (visionKey) body.visionApiKey = visionKey;
     const voiceKey = get('voiceApiKey').value; if (voiceKey) body.voiceApiKey = voiceKey;
+    const searchKeyEl = get('searchApiKey');
+    if (searchKeyEl && searchKeyEl.value) body.searchApiKey = searchKeyEl.value;
     // 嗓子四块：当前这块 + 四块的草稿一起送（服务端按 pick 套用，别块的字段不丢）
     saveVoiceInputs();
     body.voicePick = voicePickNow;

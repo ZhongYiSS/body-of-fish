@@ -553,8 +553,9 @@ function subtitleSectionField(own: unknown, label: string): { subtitle?: Record<
 }
 
 /**
- * search 段：只认 `enabled`（联网查资料的总开关，默认开）。
- * 【11-11 m20199】哥哥：开关放状态子菜单、默认开。
+ * search 段：`enabled`（联网查总开关，默认开）+ 搜索来源（11-22 哥哥 m35769）。
+ * 来源三种写法：`provider: 'free'`（抓搜索引擎结果页，免费）/ `'deepseek'`（DeepSeek 搜索 API，要 key）/
+ * `baseUrl` + `apiKey` + `model` 指向别家兼容接口。少了哪个键就会在存设置时被静默丢掉。
  */
 function searchSectionField(own: unknown, label: string): { search?: Record<string, unknown> } {
   if (own === null || typeof own !== 'object' || Array.isArray(own)) return {};
@@ -563,6 +564,16 @@ function searchSectionField(own: unknown, label: string): { search?: Record<stri
   if (src.enabled !== undefined && src.enabled !== null) {
     if (typeof src.enabled === 'boolean') out.enabled = src.enabled;
     else warnOnce(label + ':search.enabled', '「' + label + '」的 search.enabled 非法，已忽略');
+  }
+  if (src.provider !== undefined && src.provider !== null) {
+    if (src.provider === 'free' || src.provider === 'deepseek') out.provider = src.provider;
+    else warnOnce(label + ':search.provider', '「' + label + '」的 search.provider 只能是 free / deepseek，已忽略');
+  }
+  for (const key of ['baseUrl', 'apiKey', 'model'] as const) {
+    const raw = src[key];
+    if (raw === undefined || raw === null) continue;
+    if (typeof raw === 'string' && raw.length <= 8192) out[key] = raw;
+    else warnOnce(label + ':search.' + key, '「' + label + '」的 search.' + key + ' 非法，已忽略');
   }
   return Object.keys(out).length > 0 ? { search: out } : {};
 }

@@ -115,6 +115,8 @@ export interface LiveForegroundLike {
   idleMs: number;
   rect: { w: number; h: number } | null;
   screen: { w: number; h: number } | null;
+  /** 进程名（explorer、msedge…）：没有窗口标题时用它兜一个名字（11-22 m35769） */
+  exe?: string;
 }
 
 export interface LiveContextDeps {
@@ -137,6 +139,41 @@ export interface LiveContextResult {
   title: string;
 }
 
+/**
+ * 进程名 → 人话（【汐儿 · 11-22 m35769】哥哥问「读窗口名生效了吗」）。
+ * 前台没标题时（任务栏 / 桌面 / 刚切过去），只剩形状没有名字，她只能说「不知道」——
+ * 用进程名兜一句「资源管理器」比空着强。
+ */
+const EXE_LABELS: Record<string, string> = {
+  explorer: '资源管理器',
+  msedge: 'Edge',
+  chrome: 'Chrome',
+  firefox: 'Firefox',
+  code: 'VS Code',
+  windowsterminal: '终端',
+  cmd: '命令提示符',
+  powershell: 'PowerShell',
+  notepad: '记事本',
+  'battle.net': '战网',
+  steam: 'Steam',
+  potplayermini64: 'PotPlayer',
+  vlc: 'VLC',
+  'deepseek harness': 'DSH',
+  bodyoffish: '本鱼陪伴',
+  applicationframehost: '系统设置',
+  systemsettings: '设置',
+};
+
+/** 拿不到窗口标题时用什么顶上（进程名认识就给中文，不认识就给 exe 原名；都没有就空串） */
+export function exeLabel(exe: string): string {
+  const key = String(exe ?? '')
+    .trim()
+    .toLowerCase()
+    .replace(/\.exe$/u, '');
+  if (key === '') return '';
+  return EXE_LABELS[key] ?? key;
+}
+
 export async function readLiveContext(deps: LiveContextDeps): Promise<LiveContextResult> {
   const at = deps.now ?? Date.now();
   let fg: LiveForegroundLike;
@@ -146,7 +183,9 @@ export async function readLiveContext(deps: LiveContextDeps): Promise<LiveContex
     return { line: '', idleMs: -1, title: '' };
   }
   const tidy = deps.tidy ?? ((title: string): string => String(title ?? '').trim());
-  const title = tidy(fg.title ?? '');
+  const raw = tidy(fg.title ?? '');
+  // 标题为空时退到进程名（任务栏、桌面这些本来就没有标题）
+  const title = raw !== '' ? raw : exeLabel(fg.exe ?? '');
   if (title !== '') deps.remember(title, at);
   const line = contextLine({
     timeline: deps.timeline(),

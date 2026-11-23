@@ -6,14 +6,25 @@
  *
  * 钉死的语义：
  *   ① 窗口标题搓不出游戏名时回空串（浏览器/终端/我们自己一律不算），调用方就没名字可查；
- *   ② 百度先试、抽不到标题再搜狗；两个都空就 `ok:false`，绝不抛；
+ *   ② 360 先试、抽不到标题再搜狗、再 Bing、最后百度；全空就 `ok:false`，绝不抛；
+ *   ②' 360 只认 li.res-list，广告块/自家产品/「相关搜索」一律不算结果（11-22 m36168）；
  *   ③ 同一款当天只查一次（配额），同一个名字 6 小时内直接吃缓存；
  *   ④ 给提示词的资料最多 4 条、总共 ≤240 字。
  */
 import { describe, test } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { createLookupBook, parseBaidu, parseBing, parseSogou, searchWeb, tidyGameName, wikiLine } from './web-search';
+import {
+  createLookupBook,
+  pageText,
+  parseBaidu,
+  parseBing,
+  parseSo360,
+  parseSogou,
+  searchWeb,
+  tidyGameName,
+  wikiLine,
+} from './web-search';
 import { cleanTitle, parseForegroundLine, UNKNOWN_FOREGROUND } from './idle';
 
 const BAIDU_HTML = `
@@ -51,6 +62,61 @@ const BING_HTML = `
   <p>本条目列出同名事物的消歧义说明，别当成游戏内容。</p></li>
 </ol></body></html>`;
 
+/**
+ * 360 结果页（11-22 起是首选）：真广告是 `e-newsl-box` 整块推广，**不在 res-list 里**；
+ * res-list 里混着「360 自家 AI 页」「相关搜索·反馈」「同域第二条」——解析器要全丢掉。
+ */
+const SO360_HTML = `
+<html><body>
+<div class="e-newsl-box"><h3 class="res-title"><a href="https://hao.360.com/ad">广告推广：某某旗舰店</a></h3>
+  <p class="res-desc">整块推广，不是搜索结果，绝不许当资料。</p></div>
+<ul class="result">
+<li class="res-list" data-i="0">
+  <h3 class="res-title"><a href="https://www.so.com/link?m=aaa">战地6 第五赛季更新内容汇总-中关村在线</a></h3>
+  <p class="res-desc">2026年10月13日 - 第五赛季加入两张新地图与一个大逃杀模式，载具同步更新。</p>
+  <cite>m.zol.com.cn</cite>
+</li>
+<li class="res-list">
+  <h3 class="res-title"><a href="https://www.so.com/link?m=bbb">战地6 第五赛季玩法解析-游侠网</a></h3>
+  <p class="res-desc">新载具与新武器一并上线，赛季通行证同步开启。</p>
+  <cite>www.ali213.net</cite>
+</li>
+<li class="res-list">
+  <h3 class="res-title"><a href="https://www.so.com/link?m=ccc">AI 摘要：战地6 是什么</a></h3>
+  <p class="res-desc">360 自家 AI 页，抓进去也抽不出正文。</p>
+  <cite>ai.so.com</cite>
+</li>
+<li class="res-list">
+  <h3 class="res-title"><a href="javascript:;">相关搜索·反馈</a></h3>
+  <p class="res-desc"></p>
+  <cite></cite>
+</li>
+<li class="res-list">
+  <h3 class="res-title"><a href="https://www.so.com/link?m=ddd">战地6 另一篇-中关村在线</a></h3>
+  <p class="res-desc">同域第二条，应该被去重掉，不许挤掉别家。</p>
+  <cite>m.zol.com.cn</cite>
+</li>
+</ul></body></html>`;
+
+/** so.com/link 的跳转壳：正文就一行 window.location.replace */
+const SO360_SHELL = `<html><body><script>window.location.replace("https://m.zol.com.cn/article/1.html")</script>
+<noscript><meta http-equiv="refresh" content="0;URL='https://m.zol.com.cn/article/1.html'"></noscript></body></html>`;
+
+/** 第二条指向视频站：抓不到正文（假 fetch 对 bilibili 回 500），用来验「抓不到就退回摘要」 */
+const SO360_SHELL_VIDEO = `<html><body><script>window.location.replace("https://www.bilibili.com/video/BV1xx")</script></body></html>`;
+
+/** 真文章页：长段才是正文，短导航行要被 pageText 丢掉 */
+const ARTICLE_HTML = `
+<html><body><nav>首页 游戏 硬件 手机</nav>
+<div class="content">
+<p>战地6第五赛季将于2026年10月13日正式上线，本次更新加入拉斯维加斯与另一张城市地图，还原城市主干道与标志性建筑群。</p>
+<p>大型结构支持动态破坏，玩家可以炸开整栋楼的外墙制造通路，载具与步兵的配合因此有了新的打法。</p>
+<p>赛季通行证同步开启，包含新武器、新载具涂装与一批限时任务，通行证奖励分免费与付费两档。</p>
+<p>地图设计上，开发组把可破坏区域集中在中城与海滨两条主轴，进攻方可以从地铁隧道绕到建筑内部，防守方则需要提前封堵楼梯口。</p>
+<p>武器平衡方面，突击步枪的中距离伤害略微下调，冲锋枪的移动射击散布收窄，狙击枪的开镜时间缩短了四十毫秒。</p>
+<p>官方同时公布了后续两个赛季的排期，预计明年春季上线一张雪地地图，夏季加入夜战模式与新的载具种类。</p>
+</div><footer>版权所有</footer></body></html>`;
+
 /** 假 fetch：按 url 里的域名决定回哪段 HTML */
 function fakeFetch(pages: Record<string, string>): typeof fetch {
   return (async (input: string | URL | Request) => {
@@ -61,7 +127,15 @@ function fakeFetch(pages: Record<string, string>): typeof fetch {
         ? 'sogou'
         : url.includes('baidu.com')
           ? 'baidu'
-          : 'other';
+          : url.includes('so.com/link')
+            ? url.includes('m=bbb')
+              ? 'link-video'
+              : 'link'
+            : url.includes('so.com')
+              ? 'so360'
+              : url.includes('zol.com.cn')
+                ? 'article'
+                : 'other';
     const body = pages[key];
     if (body === undefined) return new Response('', { status: 500 });
     return new Response(body, { status: 200, headers: { 'content-type': 'text/html' } });
@@ -130,28 +204,57 @@ describe('parseBing / parseBaidu / parseSogou：从结果页抠标题和摘要',
   });
 });
 
-describe('searchWeb：必应先、搜狗次、都不抛', () => {
-  test('必应有结果就不碰别家', async () => {
-    const found = await searchWeb('泰拉瑞亚 月耀', { fetchImpl: fakeFetch({ bing: BING_HTML }) });
+describe('searchWeb：360 先、搜狗次、Bing 兜底、都不抛', () => {
+  test('360 有结果就不碰别家', async () => {
+    const found = await searchWeb('战地6 第五赛季', { fetchImpl: fakeFetch({ so360: SO360_HTML }) });
+    assert.equal(found.ok, true);
+    assert.equal(found.engine, 'so360');
+    assert.equal(found.hits.length, 2);
+  });
+
+  test('360 空 → 退到搜狗', async () => {
+    const found = await searchWeb('泰拉瑞亚 月耀', {
+      fetchImpl: fakeFetch({ so360: '<html><body>什么都没有</body></html>', sogou: SOGOU_HTML }),
+    });
+    assert.equal(found.ok, true);
+    assert.equal(found.engine, 'sogou');
+  });
+
+  test('360 被验证页挡 → 跳过它换下一家', async () => {
+    const found = await searchWeb('泰拉瑞亚 月耀', {
+      fetchImpl: fakeFetch({ so360: '<html><title>请输入验证码</title></html>', sogou: SOGOU_HTML }),
+    });
+    assert.equal(found.ok, true);
+    assert.equal(found.engine, 'sogou');
+  });
+
+  test('Bing 降成兜底：360 和搜狗都空才用它', async () => {
+    const found = await searchWeb('泰拉瑞亚 月耀', {
+      fetchImpl: fakeFetch({ so360: '<html></html>', sogou: '<html></html>', bing: BING_HTML }),
+    });
     assert.equal(found.ok, true);
     assert.equal(found.engine, 'bing');
     assert.equal(found.hits.length, 3);
   });
 
-  test('必应空 → 退到搜狗', async () => {
-    const found = await searchWeb('泰拉瑞亚 月耀', {
-      fetchImpl: fakeFetch({ bing: '<html><body>什么都没有</body></html>', sogou: SOGOU_HTML }),
+  test('解跳 + 抓正文：前两条补上 text', async () => {
+    const found = await searchWeb('战地6 第五赛季', {
+      fetchImpl: fakeFetch({ so360: SO360_HTML, link: SO360_SHELL, 'link-video': SO360_SHELL_VIDEO, article: ARTICLE_HTML }),
     });
     assert.equal(found.ok, true);
-    assert.equal(found.engine, 'sogou');
+    assert.ok((found.hits[0]!.text ?? '').length >= 300, `第一条正文 ${(found.hits[0]!.text ?? '').length} 字`);
+    assert.match(found.hits[0]!.text ?? '', /拉斯维加斯/u);
+    // 视频站/抓不到的：只留标题 + 摘要，不许抛
+    assert.equal(found.hits[1]!.text, undefined);
   });
 
-  test('必应被验证页挡 → 跳过它换下一家', async () => {
-    const found = await searchWeb('泰拉瑞亚 月耀', {
-      fetchImpl: fakeFetch({ bing: '<html><title>百度安全验证</title></html>', sogou: SOGOU_HTML }),
+  test('正文抓不到就退回标题 + 摘要，不抛', async () => {
+    const found = await searchWeb('战地6 第五赛季', {
+      fetchImpl: fakeFetch({ so360: SO360_HTML, link: SO360_SHELL }),
     });
     assert.equal(found.ok, true);
-    assert.equal(found.engine, 'sogou');
+    assert.equal(found.hits[0]!.text, undefined);
+    assert.match(found.hits[0]!.snippet, /大逃杀/u);
   });
 
   test('两个都空 → ok:false，不抛', async () => {
@@ -184,6 +287,52 @@ describe('searchWeb：必应先、搜狗次、都不抛', () => {
   });
 });
 
+describe('parseSo360：只认有机结果（11-22 m36168）', () => {
+  test('广告块、自家 AI 页、相关搜索、同域第二条全部丢掉', () => {
+    const hits = parseSo360(SO360_HTML);
+    assert.equal(hits.length, 2);
+    assert.deepEqual(
+      hits.map((hit) => hit.title),
+      ['战地6 第五赛季更新内容汇总-中关村在线', '战地6 第五赛季玩法解析-游侠网'],
+    );
+    assert.equal(hits[0]!.site, 'm.zol.com.cn');
+    assert.equal(hits[0]!.url, 'https://www.so.com/link?m=aaa');
+    assert.doesNotMatch(hits.map((hit) => hit.title).join('|'), /广告推广|AI 摘要|相关搜索|另一篇/u);
+  });
+
+  test('摘要里的日期前缀去掉', () => {
+    const hits = parseSo360(SO360_HTML);
+    assert.doesNotMatch(hits[0]!.snippet, /2026年/u);
+  });
+});
+
+describe('pageText：把整页剥成像正文的几行', () => {
+  test('长段留下、导航和版权那种短行丢掉', () => {
+    const body = pageText(ARTICLE_HTML);
+    assert.match(body, /拉斯维加斯/u);
+    assert.match(body, /动态破坏/u);
+    assert.doesNotMatch(body, /版权所有/u);
+    assert.doesNotMatch(body, /首页 游戏 硬件 手机/u);
+  });
+
+  test('空格切的导航条、・开头的关系链接、重复标题都丢掉（11-22 真机看到的样子）', () => {
+    const body = pageText(`<div>
+<p>页游大全 今日开服 页游新闻 测试表 厂商黄页 新游评测 页游视频</p>
+<p>・ 《Fate/stay night》中文免安装版</p>
+<p>1.4.5版本的一大核心变化是重新设计的制作界面，旨在让玩家更轻松地浏览游戏内如今已超六千件的庞大物品库。</p>
+<p>1.4.5版本的一大核心变化是重新设计的制作界面，旨在让玩家更轻松地浏览游戏内如今已超六千件的庞大物品库。</p>
+</div>`);
+    assert.doesNotMatch(body, /页游大全/u);
+    assert.doesNotMatch(body, /Fate/u);
+    assert.equal(body.split('\n').length, 1, `重复标题没去重：${body}`);
+  });
+
+  test('超长就截到上限', () => {
+    const body = pageText(`<p>${'长'.repeat(3000)}</p>`, 500);
+    assert.equal(body.length, 500);
+  });
+});
+
 describe('wikiLine：给提示词的那一行', () => {
   test('最多 4 条，总长不超过 240', () => {
     const line = wikiLine({
@@ -200,6 +349,20 @@ describe('wikiLine：给提示词的那一行', () => {
   test('没搜到就是空串', () => {
     assert.equal(wikiLine({ ok: false, engine: 'none', query: 'q', hits: [], ms: 1 }), '');
   });
+
+  test('有正文就给正文（≤900 字），没正文才退回摘要', () => {
+    const body = '战地6第五赛季加入拉斯维加斯地图，支持动态破坏。'.repeat(30);
+    const line = wikiLine({
+      ok: true,
+      engine: 'so360',
+      query: 'q',
+      ms: 1,
+      hits: [{ title: '战地6 第五赛季', snippet: '短摘要', text: body }],
+    });
+    assert.ok(line.length <= 900, `长 ${line.length}`);
+    assert.match(line, /拉斯维加斯/u);
+    assert.ok(line.length > 300, `正文没进去，长 ${line.length}`);
+  });
 });
 
 describe('createLookupBook：缓存 + 当天配额', () => {
@@ -211,10 +374,14 @@ describe('createLookupBook：缓存 + 当天配额', () => {
     }) as unknown as typeof fetch;
     const book = createLookupBook({ fetchImpl: spy, clock: () => Date.UTC(2026, 10, 10, 4, 0, 0) });
     const first = await book.lookup('Terraria');
+    // 11-22 起引擎顺序是 360 → 搜狗 → Bing：这个假 fetch 对谁都回必应页，
+    // 所以第一次会试满三家。这里只关心「第二次一条都不发」。
+    const afterFirst = calls;
     const second = await book.lookup('Terraria');
     assert.equal(first.cached, false);
     assert.equal(second.cached, true);
-    assert.equal(calls, 1);
+    assert.ok(afterFirst >= 1, `第一次应该发过请求，实际 ${afterFirst}`);
+    assert.equal(calls, afterFirst);
     assert.match(first.wiki, /沙盒/u);
   });
 

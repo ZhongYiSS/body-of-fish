@@ -55,6 +55,24 @@ test('查到了：标题 + 摘要压进提示词，只当资料', async () => {
   assert.equal(out.reason, undefined);
 });
 
+test('有正文时资料给正文，不再只喂 90 字摘要（11-22 m36168）', () => {
+  const body = '第五赛季加入拉斯维加斯地图，大型结构支持动态破坏，载具与步兵配合有了新打法。'.repeat(8);
+  const note = composeNote('战地6 第五赛季', [
+    { title: '战地6 第五赛季更新汇总', snippet: '很短的摘要', text: body },
+    hit('另一条', '第二条摘要'),
+  ]);
+  assert.match(note, /拉斯维加斯/u);
+  assert.ok(note.length > 300, `正文没进去，长 ${note.length}`);
+  assert.ok(note.length <= 1100, `超上限了：${note.length}`);
+  // 只当参考的口气不变
+  assert.match(note, /只当参考，别照念/u);
+});
+
+test('正文太短（<300 字）就不算正文，退回摘要', () => {
+  const note = composeNote('q', [{ title: '标题', snippet: '这只是一句摘要', text: '短'.repeat(80) }]);
+  assert.match(note, /这只是一句摘要/u);
+});
+
 test('搜不到时给「别编」兜底，不装查过', async () => {
   const runner = createSearchRunner({ search: async (q) => result(q, []) });
   const out = await runner.run('某个查不到的东西');

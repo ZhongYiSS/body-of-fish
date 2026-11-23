@@ -230,7 +230,7 @@ import { composeGrid, GRID_FRAMES, removeQuietly } from './grid';
 import { DETAIL_STOCK, WATCH_STOCK, freshTemplate } from './legacy-prompts';
 import { contextLine, pushTimeline, readLiveContext, type TimelineEntry } from './screen-context';
 import { normalizeWatchMode, pageName, pickWindow, targetLine, type WatchMode, type WindowInfo } from './screen-target';
-import { searchWeb, wikiLine } from './web-search';
+import { searchWeb, wikiLine, type SearchProvider } from './web-search';
 import { createSubtitleBook } from './bili-subtitle';
 import { createStoryCache } from './bili-story';
 import { createSearchRunner, failedNote, parseToolCall, SEARCH_TOOL_HINT } from './chat-search';
@@ -1831,7 +1831,24 @@ export function apply(ctx: any): void {
     const section = (found?.conf.search ?? null) as Record<string, unknown> | null;
     return section?.enabled !== false;
   };
-  const searchRunner = createSearchRunner();
+  /**
+   * 搜索来源（【汐儿 · 11-22 m35769】哥哥：「现在的联网查效果太差了……不过免费接口也要保留」）。
+   * `free` = 抓搜索引擎结果页；`deepseek` = DeepSeek 搜索 API（每条带 600~800 字长摘要）。
+   * 选了 deepseek 但没填 key 时按 free 跑——不然她这轮会白等一个 2 秒的失败。
+   */
+  const searchSource = (): SearchProvider => {
+    const found = findPetInstance(readAllConfig(configPaths), 'main');
+    const section = (found?.conf.search ?? null) as Record<string, unknown> | null;
+    const apiKey = typeof section?.apiKey === 'string' ? section.apiKey.trim() : '';
+    const wanted = section?.provider === 'deepseek' ? 'deepseek' : 'free';
+    const baseUrl =
+      typeof section?.baseUrl === 'string' && section.baseUrl.trim() !== ''
+        ? section.baseUrl.trim()
+        : 'https://api.deepseek.com';
+    const model = typeof section?.model === 'string' ? section.model.trim() : '';
+    return { kind: apiKey === '' ? 'free' : wanted, baseUrl, apiKey, model };
+  };
+  const searchRunner = createSearchRunner({ provider: searchSource });
   const watchSceneDir = layout.watchNotes;
   const watchScenePath = join(watchSceneDir, 'scene.json');
   // 【汐儿 · 11-11 m20008】视频模式改成「单张图 + 整片剧情梗概」：
@@ -2036,6 +2053,8 @@ export function apply(ctx: any): void {
     }
     // 【汐儿 · 11-19 m30770】他这会儿：①窗口时间线（名字变了才记）②离开多久 ③窗口形状+屏幕尺寸
     if (title !== '') watchTimeline = pushTimeline(watchTimeline, { at: t0, label: title });
+    // 【汐儿 · 11-22 m35769】窗口名也进日志（以前只写在陪伴 jsonl 里，`mind.log` 里查不到）
+    noteLog('mind.log', 'watch', `win=${title === '' ? '-' : title}`);
     const screenCtx = contextLine({
       timeline: watchTimeline,
       idleMs: fg.idleMs,
@@ -2492,6 +2511,9 @@ export function apply(ctx: any): void {
       const eyes = servicesProvider('main').eyes.available();
       if (!eyes.ready) return fail(`识图接口没配好：${eyes.reason?.message ?? '未知原因'}`);
       const live = await liveContext();
+      // 【汐儿 · 11-22 m35769】哥哥问「读窗口名生效了吗」——以前窗口名只进提示词、不落日志，
+      // 事后根本查不出来。这里记一行，`logs/mind.log` 里 `[look] win=` 就是当时的窗口名。
+      noteLog('mind.log', 'look', `win=${live.title === '' ? '-' : live.title}`);
       const seen = await servicesProvider('main').eyes.look({ image: shot, prompt: lookPrompt(live.title) });
       lookMark('eyes');
       const description = (seen.text ?? '').trim();
@@ -4300,6 +4322,27 @@ export function apply(ctx: any): void {
         result = { ok: true, message: next ? '联网查资料开了' : '联网查资料关了' };
         break;
       }
+      // 【汐儿 · 11-22 m35769】搜索来源：免费爬虫 ↔ DeepSeek 搜索 API（写配置 search.provider）
+      case 'search-source': {
+        const next = searchSource().kind === 'deepseek' ? 'free' : 'deepseek';
+        updateUserConfig((raw) => {
+          const section =
+            raw.search !== null && typeof raw.search === 'object' ? (raw.search as Record<string, unknown>) : {};
+          raw.search = { ...section, provider: next };
+        });
+        refreshPetMenu();
+        const hasKey = searchSource().apiKey !== '';
+        result = {
+          ok: true,
+          message:
+            next === 'deepseek'
+              ? hasKey
+                ? '搜索改用 DeepSeek（一条能带六七百字摘要）'
+                : '搜索想用 DeepSeek，但还没填 key——现在仍按免费跑，去设置页「其他」填一把'
+              : '搜索改回免费那条（抓搜索引擎结果页）',
+        };
+        break;
+      }
       // 【11-20 体检 ⑦】听常驻开关（写配置 ear.resident；听.py 每次录音前读 /services/asr）
       // 【0.6 第 4 步】「听：听写模型 · medium」：本机只有一档，点了说明一句，不假装能切
       case 'asr-model':
@@ -4479,6 +4522,11 @@ export function apply(ctx: any): void {
       companionIntervalMs: companionIntervalMs > 0 ? companionIntervalMs : configuredCompanionMs(),
       lyricRunning: lyricAgent !== null,
       earResident: earResident(),
+      // 状态层「联网查 · 开/关」：菜单标签读的就是这个字段（11-22 自测发现漏传 → 点了开关
+      // 配置真变了、标签却永远显示「开」，看着像点了没反应）
+      searchEnabled: searchEnabled(),
+        // 【汐儿 · 11-22 m35769】搜索来源也进菜单状态（免费 / DeepSeek），标签要读这份
+        searchProvider: searchSource().kind,
       // 状态那一层的「嗓子 / 眼睛」要显示当前后端（关/本地/云），读的是同一条 model 配置
       vision: backendWordOf(parseModelConfig(whisperConf.model).vision),
       voice: backendWordOf(parseModelConfig(whisperConf.model).tts),

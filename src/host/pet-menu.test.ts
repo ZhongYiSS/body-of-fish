@@ -79,6 +79,8 @@ test('状态二级：只剩 嗓子/联网查/接入（眼睛、歌词、听常�
     // 【0.6 第 4 步 补】嗓子归「听」了，状态层只留不归看/听/陪伴的东西。
     // 11-11 m20199：联网查资料（默认开）
     '状态：联网查 · 开',
+    // 11-22 m35769：搜索来源（默认免费，可切 DeepSeek）
+    '状态：搜索来源 · 免费（点一下换 DeepSeek）',
     // 11-01 新增：装插件这一项不依赖桥是否连上（新用户第一次就靠它把插件装进 DSH）
     '状态：接入 · 装插件到 DSH…',
   ]);
@@ -92,7 +94,7 @@ test('状态二级：只剩 嗓子/联网查/接入（眼睛、歌词、听常�
     voice: 'remote',
     watch: { running: true, pace: 'normal' },
   }).filter((label) => label.startsWith(STATE_PREFIX));
-  assert.deepEqual(on, ['状态：联网查 · 开', '状态：接入 · 装插件到 DSH…']);
+  assert.deepEqual(on, ['状态：联网查 · 开', '状态：搜索来源 · 免费（点一下换 DeepSeek）', '状态：接入 · 装插件到 DSH…']);
   // 嗓子、歌词、听常驻、眼睛都不再占状态层（0.6 第 4 步 补）
   assert.ok(!on.some((label) => label.includes('嗓子') || label.includes('歌词') || label.includes('眼睛')));
 });

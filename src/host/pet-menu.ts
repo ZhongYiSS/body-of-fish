@@ -86,6 +86,8 @@ export interface PetMenuState {
   lyricRunning: boolean;
   /** 联网查资料的总开关（默认开；只有显式关才是 false） */
   searchEnabled?: boolean;
+  /** 搜索来源：free = 免费爬虫、deepseek = DeepSeek 搜索 API（【汐儿 · 11-22 m35769】） */
+  searchProvider?: 'free' | 'deepseek';
   /** 耳朵常驻（whisper 模型只加载一次）：配置里的 ear.resident；undefined = 没设（默认关） */
   earResident?: boolean;
   /** 看图当前后端（眼睛那一项要显示 关/本地/云） */
@@ -213,6 +215,8 @@ export function petMenuLabels(state: PetMenuState): string[] {
     // 【0.6 第 4 步 补】嗓子也搬走（进「听」层）——状态层只剩联网查与接入。
     // 【汐儿 · 11-11 m20199】联网查资料：哥哥说放状态子菜单里、默认开
     `${STATE_PREFIX}联网查 · ${state.searchEnabled === false ? '关' : '开'}`,
+    // 【汐儿 · 11-22 m35769】搜索来源：免费（抓搜索引擎结果页）/ DeepSeek 搜索 API，点了就地换
+    `${STATE_PREFIX}搜索来源 · ${state.searchProvider === 'deepseek' ? 'DeepSeek（点一下换免费）' : '免费（点一下换 DeepSeek）'}`,
     // 接入 DSH（哥哥 11-01：状态层里要有一个「把桌宠接到 DSH」的开关）；
     // 11-01 晚改：会话一多，菜单里一条一个就翻不动了 → 只留「选会话…」（开网页选），
     // 开关标签里带上当前接的那个会话短名，一眼能看出接的是谁。
@@ -333,6 +337,8 @@ export type PetMenuAction =
   | { readonly kind: 'lyric-toggle' }
   /** 状态层第四项：联网查资料（默认开，哥哥 11-11 m20199 放状态子菜单） */
   | { readonly kind: 'search-toggle' }
+  /** 状态层：搜索来源（免费 / DeepSeek，11-22 m35769） */
+  | { readonly kind: 'search-source' }
   | { readonly kind: 'ear-resident-toggle' }
   /** 【0.6 第 4 步】「听：听写模型 · medium」：本机只有 medium 一档，点了给一句说明 */
   | { readonly kind: 'asr-model' }
@@ -375,6 +381,8 @@ const STATE_VOICE = /^状态：嗓子\s*·/;
 const STATE_VISION = /^状态：眼睛\s*·/;
 const STATE_LYRIC = /^状态：歌词\s*·/;
 const STATE_SEARCH = /^状态：联网查\s*·/;
+/** `状态：搜索来源 · 免费（点一下换 DeepSeek）`（11-22 m35769） */
+const STATE_SEARCH_SOURCE = /^状态：搜索来源\s*·/;
 /** `状态：听常驻 · ✓ 开`（体检 ⑦：whisper 常驻的总开关） */
 const STATE_EAR_RESIDENT = /^状态：听常驻\s*·/;
 /** `状态：接入 · …`（两个空格容忍） */
@@ -404,6 +412,7 @@ export function parsePetMenuLabel(label: string): PetMenuAction | null {
   if (STATE_VOICE.test(text)) return { kind: 'cycle-voice' };
   if (STATE_VISION.test(text)) return { kind: 'cycle-vision' };
   if (STATE_LYRIC.test(text)) return { kind: 'lyric-toggle' };
+  if (STATE_SEARCH_SOURCE.test(text)) return { kind: 'search-source' };
   if (STATE_SEARCH.test(text)) return { kind: 'search-toggle' };
   if (STATE_EAR_RESIDENT.test(text)) return { kind: 'ear-resident-toggle' };
   if (STATE_WATCH.test(text)) return { kind: 'watch-toggle' };
@@ -588,6 +597,8 @@ export function petMenuFeedback(
     case 'companion-toggle':
     case 'lyric-toggle':
     case 'search-toggle':
+    // 搜索来源切换：宿主会把「换成了什么」放进 message
+    case 'search-source':
     // 体检 ⑦：耳朵常驻开关，宿主会把「开了/关了」放进 message
     case 'ear-resident-toggle':
     case 'asr-model':

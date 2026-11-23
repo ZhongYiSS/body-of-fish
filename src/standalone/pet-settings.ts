@@ -148,7 +148,13 @@ const patchSchema = z
   // 11-18（文档 9.13）：换卷字数 / 卡片注入条数 / 嘴边队列长度
   contextRollChars: z.number().int().min(800).max(20000).optional(),
   contextCardInject: z.number().int().min(1).max(20).optional(),
-  mouthQueueMax: z.number().int().min(1).max(10).optional(),
+  searchProvider: z.enum(['free', 'deepseek']).optional(),
+    searchBaseUrl: urlField(2048).optional(),
+    searchApiKey: z.string().trim().max(8192).optional(),
+    /** 显式清掉搜索用的 key（空串本身按「不修改」处理） */
+    clearSearchApiKey: z.boolean().optional(),
+    searchModel: z.string().trim().max(200).optional(),
+    mouthQueueMax: z.number().int().min(1).max(10).optional(),
     // 【汐儿 · 11-16 m21833】提示气泡：位置偏移 + 字号
     // 【汐儿 · 11-16 m22720】不要 .int()：拖气泡预览算出来的是小数（如 12.4），
     // 一个 0.4 像素的小数会把整份设置判成无效。取整由 applyPatch 做。
@@ -347,6 +353,21 @@ export function viewOf(config: unknown): Record<string, unknown> {
     // 开关口径：桌面上现在有没有这只鱼（web/both 的网页端不受影响）
     desktopVisible: display === 'desktop' || display === 'both',
     earResident: asBool(asDict(root.ear)?.resident, false),
+    // 联网查的来源（【汐儿 · 11-22 m35769】哥哥要「可切换、重启也保持」）
+    searchProvider: asDict(root.search)?.provider === 'deepseek' ? 'deepseek' : 'free',
+    searchBaseUrl: ((): string => {
+      const url = asDict(root.search)?.baseUrl;
+      return typeof url === 'string' ? url : '';
+    })(),
+    searchModel: ((): string => {
+      const name = asDict(root.search)?.model;
+      return typeof name === 'string' ? name : '';
+    })(),
+    /** 键不回显；这里只告诉她「有没有填过」 */
+    hasSearchApiKey: ((): boolean => {
+      const key = asDict(root.search)?.apiKey;
+      return typeof key === 'string' && key.trim() !== '';
+    })(),
     corner: (CORNERS as readonly string[]).includes(corner) ? corner : FALLBACK.corner,
     marginX: asInt(position?.marginX, FALLBACK.marginX, 0, 4000),
     marginY: asInt(position?.marginY, FALLBACK.marginY, 0, 4000),
@@ -514,6 +535,30 @@ export function applyPatch(config: Dict, patch: PetSettingsPatch): Dict {
     const ear: Dict = { ...(asDict(next.ear) ?? {}) };
     ear.resident = patch.earResident;
     next.ear = ear;
+  }
+  // 联网查的来源（【汐儿 · 11-22 m35769】）：free / deepseek，可改地址、可填别的兼容接口与 key。
+  // 空串 = 不改（与密钥同口径）；key 想清掉就把 clearSearchApiKey 打开。
+  if (
+    patch.searchProvider !== undefined ||
+    patch.searchBaseUrl !== undefined ||
+    patch.searchApiKey !== undefined ||
+    patch.searchModel !== undefined ||
+    patch.clearSearchApiKey !== undefined
+  ) {
+    const search: Dict = { ...(asDict(next.search) ?? {}) };
+    if (patch.searchProvider !== undefined) search.provider = patch.searchProvider;
+    if (patch.searchBaseUrl !== undefined) {
+      const url = patch.searchBaseUrl.trim();
+      if (url !== '') search.baseUrl = url;
+    }
+    if (patch.searchModel !== undefined) {
+      const name = patch.searchModel.trim();
+      if (name !== '') search.model = name;
+      else delete search.model;
+    }
+    if (patch.clearSearchApiKey === true) search.apiKey = '';
+    else if (patch.searchApiKey !== undefined && patch.searchApiKey !== '') search.apiKey = patch.searchApiKey;
+    next.search = search;
   }
   // 间隔写顶层 eventsRefreshSec.whisper（秒）：与右键菜单的「碎碎念：N 分钟」同一个字段
   if (patch.whisperIntervalMin !== undefined) {

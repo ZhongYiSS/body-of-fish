@@ -96,6 +96,38 @@ test('earResident：耳朵常驻开关（顶层 ear.resident，默认关）', ()
   assert.equal(viewOf(next).earResident, true);
 });
 
+test('搜索来源：默认免费、可切 DeepSeek、地址与模型可填、key 只报有没有（11-22 m35769）', () => {
+  // 默认免费（哥哥定：默认设置就选免费）
+  assert.equal(viewOf({}).searchProvider, 'free');
+  assert.equal(viewOf({ search: { provider: 'deepseek' } }).searchProvider, 'deepseek');
+  // key 不回显，只报「有没有填过」
+  assert.equal(viewOf({}).hasSearchApiKey, false);
+  assert.equal(viewOf({ search: { apiKey: 'sk-x' } }).hasSearchApiKey, true);
+  assert.equal((viewOf({ search: { apiKey: 'sk-x' } }) as unknown as Record<string, unknown>).searchApiKey, undefined);
+
+  // 切来源 + 填地址/模型：其它字段（enabled）不许丢
+  const patched = applyPatch(
+    { search: { enabled: true, provider: 'free' } },
+    validatePetSettings({
+      searchProvider: 'deepseek',
+      searchBaseUrl: 'https://api.deepseek.com',
+      searchModel: 'deepseek-chat',
+    }),
+  );
+  assert.deepEqual(patched.search, {
+    enabled: true,
+    provider: 'deepseek',
+    baseUrl: 'https://api.deepseek.com',
+    model: 'deepseek-chat',
+  });
+  // 空串 = 不改（和密钥同口径）；要清 key 只能显式勾
+  const kept = applyPatch({ search: { apiKey: 'sk-x', baseUrl: 'https://a.example' } }, validatePetSettings({ searchApiKey: '', searchBaseUrl: '' }));
+  assert.equal((kept.search as Record<string, unknown>).apiKey, 'sk-x');
+  assert.equal((kept.search as Record<string, unknown>).baseUrl, 'https://a.example');
+  const cleared = applyPatch({ search: { apiKey: 'sk-x' } }, validatePetSettings({ clearSearchApiKey: true }));
+  assert.equal((cleared.search as Record<string, unknown>).apiKey, '');
+});
+
 test('whisperIntervalMin：间隔只认 eventsRefreshSec.whisper 这一份（分钟进、秒出）', () => {
   // 没写 → 60 秒 = 1 分钟（和陪伴的节奏接壤，11-01 定）
   assert.equal(viewOf({}).whisperIntervalMin, 1);
@@ -289,13 +321,29 @@ test('声音协议：只认 openai / sovits，参考音有长度上限', () => {
 });
 
 
-test('设置页：模型三页签与三个面板都在，默认打开对话', () => {
-    for (const name of ['chat', 'vision', 'voice']) {
+test('设置页：模型四页签与四个面板都在，默认打开对话', () => {
+    for (const name of ['chat', 'vision', 'voice', 'search']) {
       assert.ok(petSettingsPage.includes('data-mtab="' + name + '"'), '缺页签 ' + name);
       assert.ok(petSettingsPage.includes('data-mpane="' + name + '"'), '缺面板 ' + name);
     }
     assert.ok(petSettingsPage.includes('class="mpane is-on" data-mpane="chat"'));
     assert.ok(!petSettingsPage.includes('class="mpane is-on" data-mpane="voice"'));
+});
+
+// 【汐儿 · 11-22 m37429】哥哥要把「联网查」挪到模型那页、跟对话/看图/声音放一起。
+// 这条钉住位置：必须在模型页签的 mpane 里，不能在「其他」页签的 gpane 里。
+test('设置页：联网查的搜索块在「模型」页签里，不在「其他」页签', () => {
+  const modelStart = petSettingsPage.indexOf('data-gpane="model"');
+  const moreStart = petSettingsPage.indexOf('data-gpane="more"');
+  const blockAt = petSettingsPage.indexOf('<legend>联网查（搜索）</legend>');
+  assert.ok(modelStart >= 0 && moreStart > modelStart && blockAt > modelStart, '搜索块跑到模型页签外面了');
+  assert.ok(blockAt < moreStart, '搜索块还在「其他」页签里');
+  // 它的五个控件也得在，缺一个就等于搬漏了
+  for (const id of ['searchProvider', 'searchBaseUrl', 'searchApiKey', 'searchModel', 'clearSearchApiKey']) {
+    const at = petSettingsPage.indexOf('id="' + id + '"');
+    assert.ok(at > modelStart && at < moreStart, '控件 ' + id + ' 不在模型页签里');
+  }
+  assert.ok(petSettingsPage.includes('data-mtab="search">联网查</button>'));
 });
 
 test('设置页：页签脚本和样式在，且没跟提示词页签抢类名', () => {

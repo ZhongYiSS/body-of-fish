@@ -17,7 +17,7 @@
  *
  * 三条边界（沿用 web-search）：图永不上传、只搜文字、搜不到就说没查到。
  */
-import { searchWeb, type SearchHit, type SearchResult } from './web-search';
+import { searchWeb, type SearchHit, type SearchProvider, type SearchResult } from './web-search';
 
 /** 拼进 system 的工具说明：只在「联网查」开着时加。标记必须一眼能认，且不像正常文本。 */
 export const SEARCH_TOOL_HINT = [
@@ -47,8 +47,10 @@ export function parseToolCall(text: string): { query: string; rest: string } | n
 export interface ChatSearchDeps {
   /** 搜一次；默认就是 web-search 的 searchWeb（测试可替换） */
   readonly search?: (query: string, timeoutMs: number, signal?: AbortSignal) => Promise<SearchResult>;
-  /** 搜一次的预算，默认 2000ms */
+  /** 搜一次的预算，默认 3200ms（含抓正文那一步） */
   readonly searchBudgetMs?: number;
+  /** 【汐儿 · 11-22 m35769】这一轮用哪条搜索源；每次真搜之前调一次，改了设置立刻生效 */
+  readonly provider?: () => SearchProvider;
   readonly now?: () => number;
 }
 
@@ -78,8 +80,13 @@ const CACHE_MAX = 50;
  * 一分钟后再试不算浪费。
  */
 const NEG_CACHE_MS = 60_000;
-const NOTE_MAX = 700;
+/** 资料整段的上限：11-22 起有正文了，700 字装不下两条正文，放到 1100 */
+const NOTE_MAX = 1100;
 const HIT_TEXT_MAX = 90;
+/** 单条正文给多少字：两条 × 420 + 标题 ≈ 900，落在 NOTE_MAX 里 */
+const HIT_BODY_MAX = 420;
+/** 正文至少这么多字才值得替掉摘要（和 web-search 的 PAGE_MIN_CHARS 同口径） */
+const HIT_BODY_MIN = 300;
 
 function withTimeout<T>(task: Promise<T>, ms: number): Promise<T | null> {
   return new Promise<T | null>((resolve) => {
@@ -117,10 +124,23 @@ export function cleanQuery(raw: string): string {
   return text.slice(0, 40);
 }
 
-/** 命中的标题 + 摘要压成一段资料；空标题跳过 */
+/**
+ * 命中的资料压成一段；空标题跳过。
+ *
+ * 【11-22 m36168】哥哥说免费搜索「抓不到内容」。现在前两条会顺手抓正文（web-search 的 readPages），
+ * 所以这里优先给正文（每条 420 字，最多 2 条），剩下的才用标题 + 摘要兜底——
+ * 有正文还只喂 90 字摘要，等于白抓。
+ */
 export function composeNote(query: string, hits: readonly SearchHit[]): string {
   const picked: string[] = [];
+  const bodies = hits.filter((hit) => hit.title.trim() !== '' && (hit.text ?? '').length >= HIT_BODY_MIN);
+  for (const hit of bodies.slice(0, 2)) {
+    const body = (hit.text ?? '').replace(/\s*\n\s*/gu, '\n').trim().slice(0, HIT_BODY_MAX);
+    picked.push(`- ${hit.title.trim().slice(0, HIT_TEXT_MAX)}：\n${body}`);
+  }
   for (const hit of hits) {
+    if (picked.length >= 4) break;
+    if (bodies.includes(hit)) continue;
     const title = hit.title.trim();
     const snippet = hit.snippet.trim();
     if (title === '') continue;
@@ -128,7 +148,7 @@ export function composeNote(query: string, hits: readonly SearchHit[]): string {
       snippet === ''
         ? `- ${title.slice(0, HIT_TEXT_MAX)}`
         : `- ${title.slice(0, HIT_TEXT_MAX)}：${snippet.slice(0, HIT_TEXT_MAX)}`;
-    if (picked.push(line) >= 4) break;
+    picked.push(line);
   }
   if (picked.length === 0) return '';
   const head = `【刚在网上查到的（"${query}"，只当参考，别照念）】`;
@@ -141,11 +161,20 @@ export function failedNote(): string {
 }
 
 export function createSearchRunner(deps: ChatSearchDeps = {}): SearchRunner {
-  const budgetMs = deps.searchBudgetMs ?? 2000;
+  /**
+   * 【11-22 m36168】以前 2000ms：只抓一页结果页（300~800ms）绰绰有余。
+   * 现在多了一步「解跳 + 并发抓前两条正文」（实测 0.5~1.4 秒），2 秒会被掐在半路、白抓。
+   * 硬上限是 budgetMs + 500，所以最坏 3.7 秒；实测常规 1.5~2.5 秒。
+   */
+  const budgetMs = deps.searchBudgetMs ?? 3200;
   const search =
     deps.search ??
     ((query: string, timeoutMs: number, signal?: AbortSignal): Promise<SearchResult> =>
-      searchWeb(query, { timeoutMs, ...(signal === undefined ? {} : { signal }) }).catch(
+      searchWeb(query, {
+        timeoutMs,
+        ...(deps.provider === undefined ? {} : { provider: deps.provider() }),
+        ...(signal === undefined ? {} : { signal }),
+      }).catch(
         (): SearchResult => ({ ok: false, engine: 'none', query, hits: [], ms: 0, reason: 'thrown' }),
       ));
   const cache = new Map<string, { at: number; ttl: number; result: SearchResult }>();
